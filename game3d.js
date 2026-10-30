@@ -1431,7 +1431,8 @@ uic.addEventListener('pointerdown', ev => {
     const bonus = Math.round(Math.ceil(G.next) * (1 + G.wave * 0.25)); if (bonus > 0) { dropCoins(G.hero.x, G.hero.z, bonus); toast('Early fight: +' + bonus + ' coins', '#ffd23f'); }
     G.next = 0; AU.play('tap'); return;
   }
-  if (joyId === null) { joyId = ev.pointerId; input.joy = { x: p.x, y: p.y }; input.dx = input.dz = 0; try { uic.setPointerCapture(ev.pointerId); } catch (e) {} }
+  // a first finger always takes the stick, in case iOS never sent the last finger's up
+  if (joyId === null || ev.isPrimary) { joyId = ev.pointerId; input.joy = { x: p.x, y: p.y }; input.dx = input.dz = 0; try { uic.setPointerCapture(ev.pointerId); } catch (e) {} }
 }, { passive: false });
 uic.addEventListener('pointermove', ev => {
   if (ev.pointerId !== joyId || !input.joy) return;
@@ -1446,11 +1447,18 @@ addEventListener('keyup', ev => { keys[ev.key.toLowerCase()] = false; });
 document.addEventListener('visibilitychange', () => { if (document.hidden && G && G.state === 'play') { G.paused = true; writeSave(); } });
 addEventListener('resize', resize);
 addEventListener('contextmenu', e => e.preventDefault());
+// in a Safari tab, stop the page from taking the drag (that kills the touch) or zooming
+document.addEventListener('touchmove', e => { if (e.cancelable) e.preventDefault(); }, { passive: false });
+document.addEventListener('gesturestart', e => e.preventDefault());
+const dropJoy = () => { joyId = null; input.joy = null; input.dx = input.dz = 0; };
+addEventListener('blur', dropJoy); addEventListener('pagehide', dropJoy);
 
 // ================= loop =================
 let last = performance.now(), fpsAcc = 0, fpsN = 0, fpsChecked = false;
 function frame(now) {
   requestAnimationFrame(frame);
+  // iOS can report the new size late after a turn; a stale size makes taps miss the buttons
+  if (Math.round(CW / DPR) !== (innerWidth || 1024) || Math.round(CH / DPR) !== (innerHeight || 768)) resize();
   const real = Math.min(0.05, (now - last) / 1000); last = now;
   if (!input.joy) { const kx = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0), kz = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0); input.dx = kx; input.dz = kz; }
   G.shake = Math.max(0, G.shake - real * 3);
