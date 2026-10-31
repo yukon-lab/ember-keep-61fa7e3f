@@ -1,4 +1,4 @@
-// Ember Keep v2 — 3D. Walk the hero around, coins stack on his back, stand on cost pads to build/upgrade.
+// Ember Keep — one big 3D world. Walk the hero around, coins stack on his back, stop on cost pads to build/upgrade.
 import * as THREE from './vendor/three.module.min.js';
 
 const Q = new URLSearchParams(location.search);
@@ -10,13 +10,16 @@ const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 const lerp = (a, b, t) => a + (b - a) * t;
 const dist = (a, b, c, d) => Math.hypot(a - c, b - d);
 const pick = a => a[Math.floor(Math.random() * a.length)];
+const easeInOut = t => t * t * (3 - 2 * t);
 const easeBack = t => { const c = 1.9; t = clamp(t, 0, 1); return 1 + (c + 1) * Math.pow(t - 1, 3) + c * Math.pow(t - 1, 2); };
 function fmt(n) { n = Math.floor(n); if (n < 1000) return '' + n; const u = ['K', 'M', 'B', 'T']; let i = -1; while (n >= 1000 && i < 3) { n /= 1000; i++; } return (n < 10 ? n.toFixed(2) : n < 100 ? n.toFixed(1) : Math.floor(n)) + u[i]; }
 function seeded(a) { return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
 
 // ================= world layout =================
-const MAPW = 84, MAPH = 48;
-const KEEP = { x: 7.5, z: 24 };
+const MAPW = 600, MAPH = 380;
+// the home valley was drawn on a small grid: wx/wz place it, 1.7x wider, in the big world
+const wx = x => 250 + (x - 7.5) * 1.7, wz = z => 190 + (z - 24) * 1.7;
+const KEEP = { x: 250, z: 190 };
 const PATHS = [
   { pts: [[96, 8], [66, 9.5], [50, 15], [38, 19.5], [26, 22.2], [12, 24]], from: 1 },
   { pts: [[96, 40], [66, 38.5], [50, 33], [38, 28.5], [26, 25.8], [12, 24]], from: 2 },
@@ -24,6 +27,7 @@ const PATHS = [
   { pts: [[51, 58], [49, 43], [50, 33], [38, 28.5], [26, 25.8], [12, 24]], from: 10 },
 ];
 for (const p of PATHS) {
+  p.pts = p.pts.map(q => [wx(q[0]), wz(q[1])]);
   p.cum = [0];
   for (let i = 1; i < p.pts.length; i++) p.cum.push(p.cum[i - 1] + dist(p.pts[i - 1][0], p.pts[i - 1][1], p.pts[i][0], p.pts[i][1]));
   p.len = p.cum[p.cum.length - 1]; p.walls = [];
@@ -45,20 +49,53 @@ function projS(p, x, z) {
 }
 // enemy castles: one at the far end of each road. Enemies march out of the gate. Capture one and that road goes quiet.
 const FORTS = [
-  { x: 79, z: 9, unlock: 5, name: 'EAST CASTLE' },
-  { x: 79, z: 39, unlock: 9, name: 'SOUTH-EAST CASTLE' },
-  { x: 49, z: 2, unlock: 13, name: 'NORTH CASTLE' },
-  { x: 49, z: 46, unlock: 17, name: 'SOUTH CASTLE' },
+  { id: 'c0', fi: 0, x: wx(79), z: wz(9), unlock: 5, pw: 5, sz: 1, r: 'home', name: 'EAST CASTLE' },
+  { id: 'c1', fi: 1, x: wx(79), z: wz(39), unlock: 9, pw: 9, sz: 1, r: 'home', name: 'SOUTH-EAST CASTLE' },
+  { id: 'c2', fi: 2, x: wx(49), z: wz(2), unlock: 13, pw: 13, sz: 1, r: 'home', name: 'NORTH CASTLE' },
+  { id: 'c3', fi: 3, x: wx(49), z: wz(46), unlock: 17, pw: 17, sz: 1, r: 'home', name: 'SOUTH CASTLE' },
 ];
 PATHS.forEach((p, i) => { const f = FORTS[i]; f.path = p; p.start = projS(p, f.x, f.z).s + 4.5; });
-const BANK_DEP = { x: 4.5, z: 43 }, BANK_WD = { x: 13.5, z: 43 };
-const INV_IN = { x: 13.5, z: 5 }, INV_OUT = { x: 22.5, z: 5 };
+// the wider world: walk there and take these castles yourself
+const REALMS = {
+  home: { name: 'HOME VALE', sub: 'Your land. Waves only come while you are here.', pay: '' },
+  forest: { name: 'DARK FOREST', sub: 'Tall pines and plenty of wood', pay: 'wood' },
+  desert: { name: 'SAND WASTES', sub: 'Rich in gold', pay: 'coins' },
+  frost: { name: 'FROST PEAKS', sub: 'Cold, with plenty of stone', pay: 'stone' },
+  fire: { name: 'FIRE LANDS', sub: 'The Emperor waits here', pay: 'troops' },
+};
+const realmAt = (x, z) => x > 440 ? 'frost' : x < 170 ? 'fire' : z < 112 ? 'forest' : z > 268 ? 'desert' : 'home';
+const LANDS = [
+  { id: 'f1', name: 'PINEWATCH', x: 215, z: 85, pw: 12 }, { id: 'f3', name: 'MOSSFORD', x: 345, z: 85, pw: 15 }, { id: 'f2', name: 'OAK HOLLOW', x: 190, z: 40, pw: 18 }, { id: 'fc', name: 'FOREST CAPITAL', x: 290, z: 35, pw: 24, cap: true },
+  { id: 'd1', name: 'DUNE GATE', x: 215, z: 295, pw: 20 }, { id: 'd3', name: 'SUNSPIRE', x: 345, z: 295, pw: 23 }, { id: 'd2', name: 'RED OASIS', x: 190, z: 340, pw: 26 }, { id: 'dc', name: 'DESERT CAPITAL', x: 290, z: 345, pw: 32, cap: true },
+  { id: 'i1', name: 'COLDWATER', x: 475, z: 125, pw: 28 }, { id: 'i3', name: 'WHITECLIFF', x: 475, z: 255, pw: 31 }, { id: 'i2', name: 'ICE PASS', x: 545, z: 80, pw: 34 }, { id: 'ic', name: 'FROST CAPITAL', x: 560, z: 190, pw: 40, cap: true },
+  { id: 'x1', name: 'ASH FIELDS', x: 120, z: 125, pw: 38 }, { id: 'x2', name: 'LAVA BAY', x: 120, z: 255, pw: 41 }, { id: 'x3', name: 'EMBER RIFT', x: 75, z: 190, pw: 44 }, { id: 'xc', name: "EMPEROR'S THRONE", x: 35, z: 190, pw: 55, cap: true },
+];
+for (const c of LANDS) { c.r = realmAt(c.x, c.z); c.sz = c.cap ? 1.45 : 1.1; }
+const CASTLES = [...FORTS, ...LANDS];
+const ROADS = [
+  [[wx(49), wz(2)], [345, 85], [290, 35]], [[345, 85], [215, 85], [190, 40]], [[215, 85], [120, 125]],
+  [[wx(49), wz(46)], [345, 295], [290, 345]], [[345, 295], [215, 295], [190, 340]], [[215, 295], [120, 255]],
+  [[wx(79), wz(9)], [475, 125], [545, 80], [560, 190]], [[wx(79), wz(39)], [475, 255], [560, 190]],
+  [[250, 190], [75, 190], [35, 190]], [[75, 190], [120, 125]], [[75, 190], [120, 255]],
+];
+// a coarse grid: is this spot on a road? (roads make you faster; scenery stays off them)
+const ROADGRID = new Uint8Array(300 * 190), roadAt = (x, z) => ROADGRID[clamp(Math.floor(z / 2), 0, 189) * 300 + clamp(Math.floor(x / 2), 0, 299)] === 1;
+for (const pts of [...PATHS.map(p => p.pts), ...ROADS]) for (let i = 1; i < pts.length; i++) {
+  const [ax, az] = pts[i - 1], [bx, bz] = pts[i], n = Math.ceil(dist(ax, az, bx, bz));
+  for (let k = 0; k <= n; k++) { const x = lerp(ax, bx, k / n), z = lerp(az, bz, k / n); for (let dz = -3; dz <= 3; dz += 2) for (let dx = -3; dx <= 3; dx += 2) { const cx = Math.floor((x + dx) / 2), cz = Math.floor((z + dz) / 2); if (cx >= 0 && cx < 300 && cz >= 0 && cz < 190) ROADGRID[cz * 300 + cx] = 1; } }
+}
+const BANK_DEP = { x: wx(4.5), z: wz(43) }, BANK_WD = { x: wx(13.5), z: wz(43) };
+const INV_IN = { x: wx(13.5), z: wz(5) }, INV_OUT = { x: wx(22.5), z: wz(5) };
+const TRAIN_Z = { x: wx(28), z: wz(40) };
 // trees and rocks to gather from. The first four are close: workers use those.
 const NODES = [
-  { k: 'wood', x: 27, z: 5 }, { k: 'stone', x: 4, z: 6 }, { k: 'wood', x: 27, z: 44 }, { k: 'stone', x: 38, z: 3 },
-  { k: 'stone', x: 38.5, z: 46 }, { k: 'wood', x: 64, z: 18 }, { k: 'stone', x: 64, z: 30 },
+  { k: 'wood', x: wx(27), z: wz(5) }, { k: 'stone', x: wx(4), z: wz(6) }, { k: 'wood', x: wx(27), z: wz(44) }, { k: 'stone', x: wx(38), z: wz(3) },
+  { k: 'stone', x: wx(38.5), z: wz(46) }, { k: 'wood', x: wx(64), z: wz(18) }, { k: 'stone', x: wx(64), z: wz(30) },
+  { k: 'wood', x: 255, z: 70, rich: true }, { k: 'wood', x: 150, z: 80, rich: true }, { k: 'wood', x: 330, z: 40, rich: true },
+  { k: 'stone', x: 510, z: 130, rich: true }, { k: 'stone', x: 520, z: 250, rich: true }, { k: 'stone', x: 80, z: 120, rich: true },
+  { k: 'wood', x: 255, z: 320, rich: true }, { k: 'stone', x: 150, z: 310, rich: true },
 ];
-const SPOTS = [...FORTS.map(f => ({ x: f.x, z: f.z, r: 7 })), { ...BANK_DEP, r: 3 }, { ...BANK_WD, r: 3 }, { ...INV_IN, r: 3 }, { ...INV_OUT, r: 3 }, ...NODES.map(n => ({ x: n.x, z: n.z, r: 4 }))];
+const SPOTS = [...CASTLES.map(f => ({ x: f.x, z: f.z, r: 9 * f.sz })), { ...TRAIN_Z, r: 3 }, { ...BANK_DEP, r: 3 }, { ...BANK_WD, r: 3 }, { ...INV_IN, r: 3 }, { ...INV_OUT, r: 3 }, ...NODES.map(n => ({ x: n.x, z: n.z, r: 4 }))];
 const nearPath = (x, z, m) => PATHS.some(p => projS(p, x, z).d < m);
 
 const TYPES = {
@@ -81,7 +118,7 @@ const TYPES = {
   quarry:   { name: 'QUARRY',   base: 40, grow: 1.5,  max: 6,  col: '#c9c2b6' },
 };
 const DEFS = [
-  { id: 'keep', type: 'keep', x: KEEP.x, z: KEEP.z, unlock: 0 },
+  { id: 'keep', type: 'keep', x: 7.5, z: 24, unlock: 0 },
   { id: 't1', type: 'archer', x: 21, z: 18.3, unlock: 0 },
   { id: 'sword', type: 'sword', x: 6, z: 15, unlock: 0 },
   { id: 't2', type: 'archer', x: 21, z: 29.8, unlock: 1 },
@@ -115,7 +152,14 @@ const DEFS = [
   { id: 'n_bk', type: 'barracks', x: 42.5, z: 5.5, fort: 2, unlock: 0, ux: 42.5, uz: 2 }, { id: 'n_mine', type: 'mine', x: 56, z: 7, fort: 2, unlock: 0, ux: 56, uz: 3 }, { id: 'n_yard', type: 'lumber', x: 56, z: 18, fort: 2, unlock: 0, ux: 60, uz: 18 },
   { id: 'd_bk', type: 'barracks', x: 42.5, z: 42.5, fort: 3, unlock: 0, ux: 44, uz: 46 }, { id: 'd_mine', type: 'mine', x: 56, z: 41, fort: 3, unlock: 0, ux: 56, uz: 45 }, { id: 'd_yard', type: 'quarry', x: 56, z: 30, fort: 3, unlock: 0, ux: 60, uz: 30 },
 ];
-const padOpen = p => p.fort !== undefined ? G.cap[p.fort] : p.unlock <= G.cleared;
+for (const d of DEFS) { d.x = wx(d.x); d.z = wz(d.z); if (d.ux !== undefined) { d.ux = wx(d.ux); d.uz = wz(d.uz); } }
+// every land you take opens a town too
+for (const c of LANDS) {
+  const yard = { forest: 'lumber', desert: 'mine', frost: 'quarry', fire: 'mine' }[c.r], gap = 15 * c.sz;
+  const shore = c.x < 50; // the throne sits by the sea: both buildings go inland
+  DEFS.push({ id: 'l_' + c.id + '_a', type: 'barracks', x: shore ? c.x + gap : c.x - gap, z: shore ? c.z - 16 : c.z + 10, land: c.id, unlock: 0 }, { id: 'l_' + c.id + '_b', type: yard, x: c.x + gap, z: shore ? c.z + 16 : c.z + 10, land: c.id, unlock: 0 });
+}
+const padOpen = p => p.land ? G.world[p.land] > 0 : p.fort !== undefined ? G.cap[p.fort] : p.unlock <= G.cleared;
 // walls block every path through their spot; their upgrade pad sits past the wall's end
 for (const d of DEFS) {
   if (d.type === 'wall') {
@@ -123,7 +167,7 @@ for (const d of DEFS) {
     for (const p of PATHS) { const pr = projS(p, d.x, d.z); if (pr.d < 0.5) { p.walls.push({ id: d.id, s: pr.s }); ang = pathPos(p, pr.s).ang; } }
     d.rot = ang; const px = -Math.sin(ang), pz = Math.cos(ang);
     const side = pz > 0 ? 1 : -1; d.ux = d.x + px * 5.2 * side; d.uz = d.z + pz * 5.2 * side;
-  } else if (d.type === 'keep') { d.ux = KEEP.x + 1; d.uz = KEEP.z + 6.2; }
+  } else if (d.type === 'keep') { d.ux = KEEP.x + 1; d.uz = KEEP.z + 8; }
   else if (d.ux !== undefined) continue;
   else {
     let best = null, bd = -1;
@@ -154,12 +198,12 @@ const renderer = new THREE.WebGLRenderer({ canvas: glc, antialias: true, powerPr
 renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#9ed7f5');
-scene.fog = new THREE.Fog('#9ed7f5', 55, 110);
-const camera = new THREE.PerspectiveCamera(40, 1, 4, 260);
+scene.fog = new THREE.Fog('#9ed7f5', 100, 210);
+const camera = new THREE.PerspectiveCamera(40, 1, 4, 420);
 scene.add(new THREE.HemisphereLight('#fffaf0', '#4f7a35', 1.35));
 const sun = new THREE.DirectionalLight('#fff0d0', 2.3);
 sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048);
-Object.assign(sun.shadow.camera, { left: -34, right: 34, top: 30, bottom: -30, near: 1, far: 140 });
+Object.assign(sun.shadow.camera, { left: -62, right: 62, top: 52, bottom: -52, near: 1, far: 220 });
 sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.04;
 scene.add(sun, sun.target);
 
@@ -178,67 +222,105 @@ const GEO = {
 };
 GEO.cone4.rotateY(Math.PI / 4);
 
-// ---------- ground, paths, scenery ----------
+// ---------- ground, roads, scenery ----------
+const nHash = (x, z) => { const t = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return t - Math.floor(t); };
+function vnoise(x, z) { const ix = Math.floor(x), iz = Math.floor(z), fx = x - ix, fz = z - iz, u = fx * fx * (3 - 2 * fx), v = fz * fz * (3 - 2 * fz); return lerp(lerp(nHash(ix, iz), nHash(ix + 1, iz), u), lerp(nHash(ix, iz + 1), nHash(ix + 1, iz + 1), u), v); }
+const fbm = (x, z) => vnoise(x, z) * 0.65 + vnoise(x * 2.3 + 9, z * 2.3 + 4) * 0.35;
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const edgeOf = (x, z) => { const R = 95, qx = Math.abs(x - MAPW / 2) - (MAPW / 2 - R), qz = Math.abs(z - MAPH / 2) - (MAPH / 2 - R); return R - (Math.hypot(Math.max(qx, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qz), 0)); };
+const clearAt = (x, z, m = 0) => !roadAt(x, z) && !DEFS.some(df => dist(x, z, df.x, df.z) < 5 + m || dist(x, z, df.ux, df.uz) < 3.6 + m) && dist(x, z, KEEP.x, KEEP.z) > 10 + m && !SPOTS.some(q => dist(x, z, q.x, q.z) < q.r + m);
+const MINI = document.createElement('canvas'), MK = 2, MX0 = -60, MZ0 = -60; MINI.width = 720 * MK; MINI.height = 500 * MK;
 (function buildWorld() {
-  const R = seeded(11);
-  const g = new THREE.PlaneGeometry(260, 200, 130, 100); g.rotateX(-Math.PI / 2); g.translate(MAPW / 2, 0, MAPH / 2);
-  const cols = [], pos = g.attributes.position, c = new THREE.Color();
-  for (let i = 0; i < pos.count; i++) {
-    const x = pos.getX(i), z = pos.getZ(i);
-    const n = Math.sin(x * 0.21) * Math.cos(z * 0.17) * 0.5 + Math.sin(x * 0.07 + z * 0.11) * 0.5 + (R() - 0.5) * 0.25;
-    c.set('#5fae3e').lerp(new THREE.Color('#78c24c'), clamp(0.5 + n * 0.5, 0, 1)); cols.push(c.r, c.g, c.b);
+  const R = seeded(11), hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+  const C = { g1: hex('#5fae3e'), g2: hex('#7fc850'), f1: hex('#2c7443'), f2: hex('#3f8f52'), d1: hex('#dcbf78'), d2: hex('#efd798'), i1: hex('#cfe3ee'), i2: hex('#f2f8fb'), a1: hex('#4f3a36'), a2: hex('#7a4a38'), lava: hex('#ff6a2a'), sand: hex('#ead9a3'), sea: hex('#3d9bd1'), sea2: hex('#5cb6e0') };
+  const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+  const g2 = MINI.getContext('2d'), img = g2.createImageData(MINI.width, MINI.height), D = img.data;
+  for (let py = 0, o = 0; py < MINI.height; py++) for (let px = 0; px < MINI.width; px++, o += 4) {
+    const x = px / MK + MX0, z = py / MK + MZ0, n = fbm(x * 0.03, z * 0.03), n2 = fbm(x * 0.012 + 40, z * 0.012 + 7), wob = (n2 - 0.5) * 60, grain = (nHash(px, py) - 0.5) * 7;
+    let c = mix(C.g1, C.g2, sstep(0.3, 0.7, n));
+    c = mix(c, mix(C.f1, C.f2, n), sstep(124, 100, z + wob));
+    c = mix(c, mix(C.d1, C.d2, sstep(0.35, 0.65, vnoise(x * 0.05 + z * 0.12, z * 0.02))), sstep(256, 280, z + wob));
+    c = mix(c, mix(C.i1, C.i2, n), sstep(428, 452, x + wob));
+    if (x + wob < 182) { let a = mix(C.a1, C.a2, n); const crack = fbm(x * 0.07 + 3, z * 0.07 + 8); if (crack > 0.62 && crack < 0.68) a = mix(a, C.lava, 0.85); c = mix(c, a, sstep(182, 158, x + wob)); }
+    const e = edgeOf(x, z) + (n2 - 0.5) * 34;
+    c = mix(c, C.sand, sstep(15, 8, e));
+    if (e < 6) { const deep = sstep(-6, -34, e); c = mix(mix(mix(C.sea, C.sea2, sstep(0.4, 0.7, n)), C.sea, deep), C.sand, sstep(2, 6, e) * 0.6); }
+    const gr2 = e < -30 ? 0 : grain;
+    D[o] = c[0] + gr2; D[o + 1] = c[1] + gr2; D[o + 2] = c[2] + gr2; D[o + 3] = 255;
   }
-  g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
-  const ground = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true })); ground.receiveShadow = true; scene.add(ground);
-  // roads: painted once into one flat picture, so crossings can't flicker
-  {
-    const X0 = -24, Z0 = -24, PW = 144, PH = 96, k = 14, c2 = document.createElement('canvas'); c2.width = PW * k; c2.height = PH * k;
-    const g2 = c2.getContext('2d'); g2.lineCap = g2.lineJoin = 'round';
-    const paint = (w, color) => { g2.strokeStyle = color; g2.lineWidth = w * k; g2.beginPath(); for (const p of PATHS) p.pts.forEach((q, i) => { const x = (q[0] - X0) * k, y = (q[1] - Z0) * k; if (i) g2.lineTo(x, y); else g2.moveTo(x, y); }); g2.stroke(); };
-    paint(4.4, '#b08a55'); paint(3.7, '#d8b47a');
-    const tex = new THREE.CanvasTexture(c2); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
-    const geo = new THREE.PlaneGeometry(PW, PH); geo.rotateX(-Math.PI / 2); geo.translate(X0 + PW / 2, 0, Z0 + PH / 2);
-    const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex, transparent: true, depthWrite: false })); m.position.y = 0.03; m.renderOrder = -1; m.receiveShadow = true; scene.add(m);
+  g2.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(MINI); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 4;
+  const geo = new THREE.PlaneGeometry(720, 500); geo.rotateX(-Math.PI / 2); geo.translate(MX0 + 360, 0, MZ0 + 250);
+  const ground = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex })); ground.receiveShadow = true; scene.add(ground);
+  const sea = new THREE.Mesh(new THREE.PlaneGeometry(4000, 4000).rotateX(-Math.PI / 2), new THREE.MeshLambertMaterial({ color: '#3d9bd1' })); sea.position.set(MAPW / 2, -0.4, MAPH / 2); scene.add(sea);
+  // roads: flat ribbons with round joints
+  const ribbon = (lines, w, y, color, off) => {
+    const v = [], add = (ax, az, bx, bz, cx, cz) => v.push(ax, y, az, bx, y, bz, cx, y, cz);
+    for (const pts of lines) for (let i = 0; i < pts.length; i++) {
+      const [x, z] = pts[i]; for (let k = 0; k < 14; k++) { const a = k / 14 * TAU, b = (k + 1) / 14 * TAU; add(x, z, x + Math.cos(b) * w / 2, z + Math.sin(b) * w / 2, x + Math.cos(a) * w / 2, z + Math.sin(a) * w / 2); }
+      if (!i) continue; const [px, pz] = pts[i - 1], d = dist(px, pz, x, z), nx = -(z - pz) / d * w / 2, nz = (x - px) / d * w / 2;
+      add(px + nx, pz + nz, x + nx, z + nz, x - nx, z - nz); add(px + nx, pz + nz, x - nx, z - nz, px - nx, pz - nz);
+    }
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3)); g.computeVertexNormals();
+    const m = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: off, polygonOffsetUnits: off })); m.receiveShadow = true; scene.add(m);
+  };
+  const lines = [...PATHS.map(p => p.pts), ...ROADS];
+  ribbon(lines, 5.6, 0.04, '#b08a55', -2); ribbon(lines, 4.7, 0.05, '#d8b47a', -4);
+  g2.lineCap = g2.lineJoin = 'round'; g2.strokeStyle = '#c9a56d'; g2.lineWidth = 4 * MK; g2.beginPath(); for (const pts of lines) pts.forEach((q, i) => { const X = (q[0] - MX0) * MK, Y = (q[1] - MZ0) * MK; if (i) g2.lineTo(X, Y); else g2.moveTo(X, Y); }); g2.stroke();
+  // scenery, in chunks so what you can't see isn't drawn
+  const buckets = new Map(), d = new THREE.Object3D();
+  const put = (g, color, x, y, z, sx, sy, sz, ry = 0, shadow = true) => {
+    const key = g + '|' + color + '|' + Math.floor(x / 80) + '|' + Math.floor(z / 80) + '|' + shadow; let b = buckets.get(key); if (!b) buckets.set(key, b = { g, color, shadow, list: [] });
+    d.position.set(x, y, z); d.scale.set(sx, sy, sz); d.rotation.set(0, ry, 0); d.updateMatrix(); b.list.push(d.matrix.clone());
+  };
+  const tree = (x, z, s, a, b) => { const r = R() * 6; put('cyl8', '#7a4a2a', x, 0.5 * s, z, 0.35 * s, s, 0.35 * s, r); put('cone6', a, x, 1.9 * s, z, 2.1 * s, 2.4 * s, 2.1 * s, r); put('cone6', b, x, 3 * s, z, 1.5 * s, 1.9 * s, 1.5 * s, r); };
+  const pine = (x, z, s) => { const r = R() * 6; put('cyl8', '#5a3a22', x, 0.6 * s, z, 0.3 * s, 1.2 * s, 0.3 * s, r); for (let i = 0; i < 3; i++) put('cone6', i % 2 ? '#1f6238' : '#2a7a48', x, (1.9 + i * 1.25) * s, z, (2.5 - i * 0.6) * s, 2.2 * s, (2.5 - i * 0.6) * s, r); };
+  const cactus = (x, z, s) => { put('cyl8', '#4f9a4a', x, 1.1 * s, z, 0.55 * s, 2.2 * s, 0.55 * s); put('cyl8', '#4f9a4a', x + 0.55 * s, 1.3 * s, z, 0.3 * s, 1 * s, 0.3 * s); put('cyl8', '#4f9a4a', x - 0.5 * s, 1.6 * s, z, 0.3 * s, 0.9 * s, 0.3 * s); };
+  const spike = (x, z, s) => { put('cone4', '#bfe6f5', x, 1.5 * s, z, 1.3 * s, 3 * s, 1.3 * s, R() * 3); put('cone4', '#e6f6fb', x + 0.8 * s, 0.8 * s, z + 0.5 * s, 0.8 * s, 1.6 * s, 0.8 * s, R() * 3); };
+  const snowpine = (x, z, s) => { const r = R() * 6; put('cyl8', '#5a3a22', x, 0.6 * s, z, 0.3 * s, 1.2 * s, 0.3 * s, r); put('cone6', '#6f9aa0', x, 2 * s, z, 2.3 * s, 2.5 * s, 2.3 * s, r); put('cone6', '#f2f8fb', x, 3.2 * s, z, 1.5 * s, 1.9 * s, 1.5 * s, r); };
+  const dead = (x, z, s) => { put('cyl8', '#2e2422', x, 1.2 * s, z, 0.3 * s, 2.4 * s, 0.3 * s); put('cyl8', '#2e2422', x + 0.4 * s, 2 * s, z, 0.14 * s, 1 * s, 0.14 * s); };
+  const COLORS = { home: '#a9a49b', forest: '#7f8a7c', desert: '#c9a262', frost: '#dfeaf0', fire: '#3a2c2a' };
+  let items = 0;
+  for (let i = 0; i < 40000 && items < 3400; i++) {
+    const x = R() * MAPW, z = R() * MAPH; if (edgeOf(x, z) < 14) continue; const r = realmAt(x, z), n = fbm(x * 0.04 + 5, z * 0.04 + 2), kind = R();
+    if (kind < 0.12) { if (!clearAt(x, z, -2)) continue; const s = 0.4 + R() * 1.1; put('rock', COLORS[r], x, 0.2 * s, z, s, s * 0.8, s, R() * 3, s > 0.9); items++; continue; }
+    const s = 0.85 + R() * 0.8;
+    if (r === 'home') { if (n < 0.56 || !clearAt(x, z, 1.5)) continue; tree(x, z, s, '#2f7d3a', '#3f9a48'); }
+    else if (r === 'forest') { if (n < 0.28 || !clearAt(x, z, 1.5)) continue; pine(x, z, s * 1.15); }
+    else if (r === 'desert') { if (n < 0.5 || !clearAt(x, z, 1)) continue; cactus(x, z, s); }
+    else if (r === 'frost') { if (n < 0.42 || !clearAt(x, z, 1.5)) continue; if (R() < 0.45) spike(x, z, s); else snowpine(x, z, s); }
+    else { if (n < 0.5 || !clearAt(x, z, 1)) continue; dead(x, z, s); }
+    items++;
   }
-  // pebbles on paths
-  const peb = new THREE.InstancedMesh(GEO.rock, mat('#c19a62'), 260); let pi = 0; const d = new THREE.Object3D();
-  for (const p of PATHS) for (let i = 0; i < 65; i++) { const q = pathPos(p, R() * p.len), o = (R() - 0.5) * 3.2; d.position.set(q.x - Math.sin(q.ang) * o, 0.05, q.z + Math.cos(q.ang) * o); d.scale.setScalar(0.12 + R() * 0.15); d.rotation.set(R() * 3, R() * 3, 0); d.updateMatrix(); peb.setMatrixAt(pi++, d.matrix); }
-  peb.count = pi; scene.add(peb);
-  // trees, rocks, cliffs
-  const clearOf = (x, z, m) => !nearPath(x, z, 2.8 + m) && !DEFS.some(df => dist(x, z, df.x, df.z) < 3.4 + m || dist(x, z, df.ux, df.uz) < 2.8 + m) && dist(x, z, KEEP.x, KEEP.z) > 7 && !SPOTS.some(q => dist(x, z, q.x, q.z) < q.r + m);
-  const trees = [];
-  for (let i = 0; i < 4000 && trees.length < 340; i++) {
-    const x = -40 + R() * (MAPW + 80), z = -30 + R() * (MAPH + 60), edge = x < 2 || x > MAPW - 2 || z < 2 || z > MAPH - 2;
-    if (!edge && R() < 0.8) continue;
-    const s = 0.8 + R() * 0.7; if (!clearOf(x, z, s)) continue; if (trees.some(t => dist(t.x, t.z, x, z) < 1.5 * s)) continue;
-    trees.push({ x, z, s, k: R() });
+  // mountains and volcanoes out in the wild
+  for (let i = 0, m = 0; i < 4000 && m < 75; i++) {
+    const x = R() * MAPW, z = R() * MAPH, r = realmAt(x, z); if (r === 'home' || edgeOf(x, z) < 22) continue;
+    const S = 9 + R() * 11; let ok = clearAt(x, z, S * 0.9); for (let a = 0; ok && a < 8; a++) if (roadAt(x + Math.cos(a) * S, z + Math.sin(a) * S)) ok = false; if (!ok) continue;
+    if (r === 'fire') { put('cone6', '#3b2b28', x, S * 0.5, z, S * 1.5, S, S * 1.5, R() * 3, false); put('cone6', '#ff6a2a', x, S * 0.93, z, S * 0.3, S * 0.16, S * 0.3, 0, false); }
+    else { const base = r === 'frost' ? '#8fa8b8' : r === 'desert' ? '#b98f55' : '#5f7a60', cap = r === 'desert' ? '#d4ac6c' : '#f4f8fa'; put('cone6', base, x, S * 0.5, z, S * 1.5, S, S * 1.5, R() * 3, false); put('cone6', cap, x, S * 0.8, z, S * 0.62, S * 0.42, S * 0.62, 0, false); }
+    m++;
   }
-  const trunk = new THREE.InstancedMesh(GEO.cyl8, mat('#7a4a2a'), trees.length), f1 = new THREE.InstancedMesh(GEO.cone6, mat('#2f7d3a'), trees.length), f2 = new THREE.InstancedMesh(GEO.cone6, mat('#3f9a48'), trees.length);
-  trees.forEach((t, i) => {
-    d.rotation.set(0, t.k * 6, 0);
-    d.position.set(t.x, 0.5 * t.s, t.z); d.scale.set(0.35 * t.s, 1 * t.s, 0.35 * t.s); d.updateMatrix(); trunk.setMatrixAt(i, d.matrix);
-    d.position.set(t.x, 1.9 * t.s, t.z); d.scale.set(2.1 * t.s, 2.4 * t.s, 2.1 * t.s); d.updateMatrix(); f1.setMatrixAt(i, d.matrix);
-    d.position.set(t.x, 3.0 * t.s, t.z); d.scale.set(1.5 * t.s, 1.9 * t.s, 1.5 * t.s); d.updateMatrix(); f2.setMatrixAt(i, d.matrix);
-  });
-  for (const m of [trunk, f1, f2]) { m.castShadow = true; m.receiveShadow = true; scene.add(m); }
-  // cliffs behind the top edge and around corners (gaps where paths enter)
-  const cliffs = [];
-  for (let x = -30; x < MAPW + 30; x += 3.2) for (const z of [-5.5, MAPH + 6]) if (!nearPath(x, z, 5)) cliffs.push([x + R(), z + (R() - 0.5) * 2, 3 + R() * 4]);
-  for (let z = -6; z < MAPH + 8; z += 3.2) if (!nearPath(-6, z, 5)) cliffs.push([-6 + R(), z, 3 + R() * 4]);
-  const cl = new THREE.InstancedMesh(BOX, mat('#b9b2a6'), cliffs.length), ct = new THREE.InstancedMesh(BOX, mat('#d8d2c4'), cliffs.length);
-  cliffs.forEach(([x, z, h], i) => {
-    d.rotation.set(0, R() * 0.6 - 0.3, 0); d.position.set(x, h / 2, z); d.scale.set(3.6, h, 4); d.updateMatrix(); cl.setMatrixAt(i, d.matrix);
-    d.position.set(x, h + 0.08, z); d.scale.set(3.7, 0.25, 4.1); d.updateMatrix(); ct.setMatrixAt(i, d.matrix);
-  });
-  for (const m of [cl, ct]) { m.castShadow = true; m.receiveShadow = true; scene.add(m); }
-  const rocks = new THREE.InstancedMesh(GEO.rock, mat('#a9a49b'), 70); let ri = 0;
-  for (let i = 0; i < 400 && ri < 70; i++) { const x = R() * MAPW, z = R() * MAPH; if (!clearOf(x, z, 0)) continue; d.position.set(x, 0.15, z); d.scale.setScalar(0.4 + R() * 0.7); d.rotation.set(R(), R() * 3, R()); d.updateMatrix(); rocks.setMatrixAt(ri++, d.matrix); }
-  rocks.count = ri; rocks.castShadow = true; rocks.receiveShadow = true; scene.add(rocks);
-  // flowers
-  const fl = new THREE.InstancedMesh(GEO.sph, new THREE.MeshLambertMaterial({ color: '#ffffff' }), 300); const fc = ['#fff3a8', '#ffffff', '#ff9ec7', '#c7a8ff', '#ffd23f'];
-  let fi = 0; for (let i = 0; i < 900 && fi < 300; i++) { const x = R() * MAPW, z = R() * MAPH; if (!clearOf(x, z, -1.5)) continue; d.position.set(x, 0.1, z); d.scale.setScalar(0.18); d.updateMatrix(); fl.setMatrixAt(fi, d.matrix); fl.setColorAt(fi++, new THREE.Color(fc[Math.floor(R() * 5)])); }
-  fl.count = fi; scene.add(fl);
+  // flowers near home, pebbles on the home roads
+  const fl = ['#fff3a8', '#ffffff', '#ff9ec7', '#c7a8ff', '#ffd23f'];
+  for (let i = 0, m = 0; i < 2600 && m < 500; i++) { const x = KEEP.x - 70 + R() * 230, z = KEEP.z - 80 + R() * 160; if (realmAt(x, z) !== 'home' || !clearAt(x, z, -3)) continue; put('sph', fl[Math.floor(R() * 5)], x, 0.1, z, 0.2, 0.2, 0.2, 0, false); m++; }
+  for (const p of PATHS) for (let i = 0; i < 70; i++) { const q = pathPos(p, R() * p.len), o = (R() - 0.5) * 3.6; put('rock', '#c19a62', q.x - Math.sin(q.ang) * o, 0.06, q.z + Math.cos(q.ang) * o, 0.2, 0.2, 0.2, R() * 3, false); }
+  for (const b of buckets.values()) { const m = new THREE.InstancedMesh(GEO[b.g], mat(b.color), b.list.length); b.list.forEach((q, i) => m.setMatrixAt(i, q)); m.castShadow = b.shadow; m.receiveShadow = true; scene.add(m); }
 })();
+// clouds cover what you have not walked to yet
+const SEEN_W = 24, SEEN_H = 17, SEEN_C = 30;
+const cloudMesh = new THREE.InstancedMesh(GEO.sph, new THREE.MeshLambertMaterial({ color: '#ffffff', emissive: '#5f6c78' }), SEEN_W * SEEN_H * 3); cloudMesh.frustumCulled = false; scene.add(cloudMesh);
+const cellOf = (x, z) => clamp(Math.floor((z + 60) / SEEN_C), 0, SEEN_H - 1) * SEEN_W + clamp(Math.floor((x + 60) / SEEN_C), 0, SEEN_W - 1);
+function setCloud(i, on) {
+  const cx = (i % SEEN_W) * SEEN_C - 60 + 15, cz = Math.floor(i / SEEN_W) * SEEN_C - 60 + 15, o = new THREE.Object3D();
+  for (let k = 0; k < 3; k++) { const a = nHash(i, k) * TAU, r = nHash(k, i) * 12, sc = on && edgeOf(cx, cz) > -16 ? 34 + nHash(i + 7, k) * 22 : 0.001; o.position.set(cx + Math.cos(a) * r, 26 + k * 3, cz + Math.sin(a) * r); o.scale.set(sc, sc * 0.5, sc); o.rotation.y = a; o.updateMatrix(); cloudMesh.setMatrixAt(i * 3 + k, o.matrix); }
+}
+for (let i = 0; i < SEEN_W * SEEN_H; i++) setCloud(i, true);
+// treasure chests hidden out in the world
+const CHESTS = (() => {
+  const R = seeded(77), out = []; for (let i = 0; i < 4000 && out.length < 24; i++) { const x = R() * MAPW, z = R() * MAPH; if (edgeOf(x, z) < 28 || dist(x, z, KEEP.x, KEEP.z) < 70 || !clearAt(x, z, 3) || out.some(c => dist(c.x, c.z, x, z) < 50)) continue; out.push({ x, z }); }
+  return out;
+})();
+for (const c of CHESTS) { const g = new THREE.Group(); g.add(box('#7a4a22', 0, 0.55, 0, 1.8, 1.1, 1.2), box('#9c6b3e', 0, 1.25, 0, 1.9, 0.4, 1.3), box('#ffd23f', 0, 0.75, 0.62, 0.4, 0.5, 0.1), box('#ffd23f', 0, 0.55, 0, 1.9, 0.14, 1.25)); g.position.set(c.x, 0, c.z); scene.add(g); c.mesh = g; }
 
 // ---------- structures ----------
 function stoneOf(lv) { return lv < 3 ? ['#9c6b3e', '#7a5228'] : lv < 6 ? ['#bdb6aa', '#8f887c'] : ['#ece6d8', '#c9a94a']; }
@@ -394,7 +476,8 @@ const nodeGroups = NODES.map(n => {
   else for (const [x, z, sc] of [[0, 0, 2.3], [1.8, 0.8, 1.4], [-1.6, 1, 1.5], [0.4, -1.5, 1.2]]) g.add(mesh(GEO.sph, x ? '#a8a194' : '#8f887c', x, 0.45 * sc, z, sc, sc * 0.9, sc));
   g.position.set(n.x, 0, n.z); scene.add(g); return g;
 });
-function syncForts() { FORTS.forEach((f, i) => { if (f.mesh) scene.remove(f.mesh); f.mesh = buildFort(G.cap[i]); f.mesh.position.set(f.x, 0, f.z); scene.add(f.mesh); }); }
+const isOurs = c => c.fi !== undefined ? G.cap[c.fi] : G.world[c.id] > 0;
+function syncForts() { for (const f of CASTLES) { const o = !!isOurs(f); if (f.mesh && f.built === o) continue; if (f.mesh) scene.remove(f.mesh); f.built = o; f.mesh = buildFort(o); f.mesh.position.set(f.x, 0, f.z); f.mesh.scale.setScalar(f.sz); scene.add(f.mesh); } }
 
 // ---------- pad decals (cost squares on the ground) ----------
 const PAD_SIZE = 3.4;
@@ -443,6 +526,7 @@ const makeZone = z => {
 };
 const bankZones = [{ spot: BANK_DEP, title: 'PUT IN', col: '#ffd23f' }, { spot: BANK_WD, title: 'TAKE OUT', col: '#7ee081' }].map(makeZone);
 const investZones = [{ spot: INV_IN, title: 'INVEST', col: '#b99cff' }, { spot: INV_OUT, title: 'CASH OUT', col: '#7ee081' }].map(makeZone);
+const trainZone = makeZone({ spot: TRAIN_Z, title: 'TRAIN', col: '#8ab4ff' });
 function drawZone(z, bank, sub) {
   const key = Math.floor(bank) + '|' + sub; if (key === z.key) return; z.key = key; const g = z.g;
   g.clearRect(0, 0, 256, 256); rr(g, 14, 14, 228, 228, 22); g.fillStyle = 'rgba(60,40,10,0.9)'; g.fill();
@@ -497,7 +581,7 @@ const ALLY_PAL = {
   follower: palette({ legs: '#22304d', body: '#2f6fe0', skin: '#f0c08f', helm: '#1f3f90', plume: '#ffd23f', weapon: '#7a4a22' }),
   soldier: palette({ legs: '#22304d', body: '#9aa6b8', skin: '#f0c08f', helm: '#cfd6e2', plume: '#3b82f6', shield: '#2f6fe0', weapon: '#e5e9f0' }),
 };
-const foes = new Crowd(700), allies = new Crowd(120);
+const foes = new Crowd(700), allies = new Crowd(170);
 
 // hero: unique model
 const hero3 = (() => {
@@ -596,15 +680,16 @@ function writeSave() {
   if (NOSAVE) return;
   if (G && G.state !== 'title') {
     const over = G.state === 'over', lv = {}; for (const p of G.pads) lv[p.id] = p.lvl;
-    SAVE = { cleared: over ? G.checkpoint : G.cleared, checkpoint: G.checkpoint, coins: over ? 15 * META.gold : Math.floor(G.coins), bank: Math.floor(G.bank), lv, cap: G.cap, empire: G.empire, raidAfter: G.raidAfter, kills: G.kills, invest: Math.floor(G.invest), wood: Math.floor(G.wood), stone: Math.floor(G.stone), troops: Math.floor(G.troops), world: G.world, wdmg: G.wdmg, goalI: G.goalI, seenMap: G.seenMap };
+    SAVE = { cleared: over ? G.checkpoint : G.cleared, checkpoint: G.checkpoint, coins: over ? 15 * META.gold : Math.floor(G.coins), bank: Math.floor(G.bank), lv, cap: G.cap, empire: G.empire, raidAfter: G.raidAfter, kills: G.kills, invest: Math.floor(G.invest), wood: Math.floor(G.wood), stone: Math.floor(G.stone), troops: Math.floor(G.troops), world: G.world, wdmg: G.wdmg, goalI: G.goalI, seenMap: G.seenMap, hx: Math.round(G.hero.x), hz: Math.round(G.hero.z), seen: G.seen, chests: G.chests };
   }
-  const blob = JSON.stringify({ ts: Date.now(), v: 4, best, meta: META, save: SAVE });
+  const blob = JSON.stringify({ ts: Date.now(), v: 5, best, meta: META, save: SAVE });
   try { localStorage.setItem('emberkeep.save', blob); } catch (e) {}
   fetch('save', { method: 'POST', body: blob, keepalive: true }).catch(() => {});
 }
 function applySave(v) {
   G.cleared = G.wave = v.cleared; G.checkpoint = v.checkpoint; G.coins = v.coins; G.bank = v.bank; G.cap = v.cap || G.cap; G.empire = v.empire || 0; G.raidAfter = v.raidAfter || 0; G.kills = v.kills || 0; G.runStart = G.wave;
-  G.invest = v.invest || 0; G.wood = v.wood || 0; G.stone = v.stone || 0; G.troops = v.troops || 0; G.world = v.world || {}; G.wdmg = v.wdmg || {}; G.goalI = v.goalI || 0; G.seenMap = !!v.seenMap;
+  G.invest = v.invest || 0; G.wood = v.wood || 0; G.stone = v.stone || 0; G.troops = v.troops || 0; G.world = v.world || {}; G.wdmg = v.wdmg || {}; G.goalI = v.goalI || 0; G.seenMap = !!v.seenMap; G.chests = v.chests || []; G.seen = v.seen || []; freshClouds();
+  if (v.hx !== undefined && edgeOf(v.hx, v.hz) > 10) { G.hero.x = v.hx; G.hero.z = v.hz; G.cam.x = v.hx; G.cam.z = v.hz; }
   for (const p of G.pads) {
     p.lvl = v.lv[p.id] ?? p.lvl; p.shown = padOpen(p) || p.lvl > 0; p.appear = p.shown ? 1 : 0;
     if (p.type === 'wall' && p.lvl) { p.maxHp = p.hp = towerStats(p).hp; p.broken = false; }
@@ -619,6 +704,7 @@ async function loadAll() {
   try { a = JSON.parse(localStorage.getItem('emberkeep.save')); } catch (e) {}
   try { const r = await Promise.race([fetch('save'), new Promise((_, no) => setTimeout(no, 1500))]); if (r.ok) b = await r.json(); } catch (e) {}
   const u = !a ? b : !b ? a : (b.ts > a.ts ? b : a); if (!u) return;
+  if ((u.v || 0) < 5) { try { localStorage.setItem('emberkeep.save.v' + (u.v || 3) + '.backup', JSON.stringify(u)); } catch (e) {} }
   if (!u.v) { try { if (!localStorage.getItem('emberkeep.save.v3')) localStorage.setItem('emberkeep.save.v3', JSON.stringify(u)); } catch (e) {} } // spare copy of the old save
   Object.assign(META, u.meta || {}); best = Math.max(best, u.best || 0);
   if (u.save) { SAVE = u.save; applySave(SAVE); }
@@ -636,11 +722,11 @@ function heroStats() {
 function towerStats(p) {
   const L = p.lvl;
   switch (p.type) {
-    case 'archer': return { dmg: 10 * Math.pow(1.52, L - 1), rate: 1.05 + 0.12 * L, range: 10.5 + 0.5 * L, shots: L >= 7 ? 3 : L >= 4 ? 2 : 1 };
-    case 'ballista': return { dmg: 34 * Math.pow(1.52, L - 1), rate: 0.5 + 0.06 * L, range: 15 + 0.5 * L };
-    case 'cannon': return { dmg: 26 * Math.pow(1.55, L - 1), rate: 0.42 + 0.05 * L, range: 12 + 0.4 * L, rad: 2.6 + 0.15 * L, barrels: L >= 4 ? 2 : 1 };
-    case 'mage': return { dmg: 24 * Math.pow(1.55, L - 1), rate: 0.55 + 0.05 * L, range: 13 + 0.5 * L, chain: 3 + L };
-    case 'keep': return { dmg: 8 * Math.pow(1.4, L - 1), rate: 1.2 + 0.06 * L, range: 12, shots: 1 + Math.floor(L / 4) };
+    case 'archer': return { dmg: 10 * Math.pow(1.52, L - 1), rate: 1.05 + 0.12 * L, range: 14 + 0.6 * L, shots: L >= 7 ? 3 : L >= 4 ? 2 : 1 };
+    case 'ballista': return { dmg: 34 * Math.pow(1.52, L - 1), rate: 0.5 + 0.06 * L, range: 20 + 0.6 * L };
+    case 'cannon': return { dmg: 26 * Math.pow(1.55, L - 1), rate: 0.42 + 0.05 * L, range: 16 + 0.5 * L, rad: 2.6 + 0.15 * L, barrels: L >= 4 ? 2 : 1 };
+    case 'mage': return { dmg: 24 * Math.pow(1.55, L - 1), rate: 0.55 + 0.05 * L, range: 17 + 0.6 * L, chain: 3 + L };
+    case 'keep': return { dmg: 8 * Math.pow(1.4, L - 1), rate: 1.2 + 0.06 * L, range: 16, shots: 1 + Math.floor(L / 4) };
     case 'wall': return { hp: Math.round(320 * Math.pow(1.72, L - 1)), spike: L >= 3 ? 6 * Math.pow(1.5, L - 1) : 0 };
     case 'barracks': return { n: Math.min(8, L + 1), dmg: 9 * Math.pow(1.5, L - 1), hp: Math.round(90 * Math.pow(1.55, L - 1)) };
     case 'recruit': return { n: L, dmg: 7 * Math.pow(1.3, L - 1), rate: 1.1, range: 9 };
@@ -660,24 +746,27 @@ function newGame() {
     waveState: 'prep', next: 8, queue: [], spawnT: 0, waveTotal: 0, waveDone: 0, preview: null,
     hero: { x: KEEP.x + 6, z: KEEP.z + 3, face: 0, walk: 0, vx: 0, vz: 0, moving: false, cd: 0, swing: 0, hp: 140, maxHp: 140, dead: 0, padT: 0, padId: null, drainT: 0, dropT: 0, hurtT: 0, regenT: 0, lagX: 0, lagZ: 0 },
     pads: [], enemies: [], soldiers: [], followers: [], arrows: [], bolts: [], balls: [], zaps: [], parts: [], puffs: [], nums: [], loot: [], drops: [],
-    bank: 0, bankT: 0, bankFull: false, invest: 0, wood: 0, stone: 0, troops: 0, world: {}, wdmg: {}, goalI: 0, goalT: 0, seenMap: false, map: null, workers: [], zoneT: 0, gatherT: 0, checkpoint: 0, runKills: 0, runStart: 0, raid: null, cap: [false, false, false, false], empire: 0, raidAfter: 0, fury: 0, sureNew: 0,
+    bank: 0, bankT: 0, bankFull: false, invest: 0, wood: 0, stone: 0, troops: 0, world: {}, wdmg: {}, goalI: 0, goalT: 0, seenMap: false, map: null, workers: [], zoneT: 0, gatherT: 0, seen: [], chests: [], seenT: 0, away: false, realm: 'home', target: null, trainT: 0, bkTop: null, checkpoint: 0, runKills: 0, runStart: 0, raid: null, cap: [false, false, false, false], empire: 0, raidAfter: 0, fury: 0, sureNew: 0,
     shake: 0, slow: 1, slowT: 0, coinPulse: 0, banner: null, toasts: [], flash: 0, tut: 0, moved: 0, paused: false, overT: 0, aiT: 0, bossRef: null,
     cam: { x: KEEP.x + 12, z: KEEP.z },
   };
   G.lv = id => G.padMap[id] ? G.padMap[id].lvl : 0;
   G.pads = DEFS.map(d => ({ ...d, lvl: d.type === 'keep' ? 1 : 0, paid: 0, pop: 0, cd: rnd(0, 1), aim: 0, hp: 0, maxHp: 0, broken: false, shown: d.unlock === 0 && d.fort === undefined, appear: d.unlock === 0 && d.fort === undefined ? 1 : 0, mesh: null }));
-  G.padMap = {}; for (const p of G.pads) { G.padMap[p.id] = p; makePad(p); }
+  G.padMap = {}; for (const p of G.pads) G.padMap[p.id] = p; // pad pictures are made when first shown
   const k = G.padMap.keep; k.maxHp = keepMax(1); k.hp = k.maxHp; rebuild(k);
   const hs = heroStats(); G.hero.maxHp = G.hero.hp = hs.hp;
   // starter coins on the ground: teach "walk to collect"
-  for (let i = 0; i < 9; i++) G.loot.push({ x: 15 + i * 0.7 + rnd(-0.3, 0.3), y: 0.05, z: 21 + Math.sin(i) * 0.8, vx: 0, vy: 0, vz: 0, st: 1, t: -99, spin: rnd(0, 6), v: 1 });
-  G.preview = buildWave(1); syncForts();
+  for (let i = 0; i < 9; i++) G.loot.push({ x: wx(15) + i * 0.9 + rnd(-0.3, 0.3), y: 0.05, z: wz(21) + Math.sin(i) * 0.9, vx: 0, vy: 0, vz: 0, st: 1, t: -99, spin: rnd(0, 6), v: 1 });
+  G.preview = buildWave(1); syncForts(); freshClouds();
 }
+function freshClouds() { for (let i = 0; i < SEEN_W * SEEN_H; i++) setCloud(i, !G.seen.includes(i)); cloudMesh.instanceMatrix.needsUpdate = true; reveal(KEEP.x + 30, KEEP.z, 150); for (const c of CASTLES) if (isOurs(c)) reveal(c.x, c.z, 90); for (const c of CHESTS) c.mesh.visible = !G.chests.includes(CHESTS.indexOf(c)); }
+function reveal(x, z, r) { let ch = false; for (let i = 0; i < SEEN_W * SEEN_H; i++) { if (G.seen.includes(i)) continue; const cx = (i % SEEN_W) * SEEN_C - 45, cz = Math.floor(i / SEEN_W) * SEEN_C - 45; if (dist(x, z, cx, cz) < r) { G.seen.push(i); setCloud(i, false); ch = true; } } if (ch) cloudMesh.instanceMatrix.needsUpdate = true; }
+const isSeen = (x, z) => G.seen.includes(cellOf(x, z));
 // the keep fell: buildings stay, coins on you are gone, back to the last checkpoint
 function retry() {
   for (const k of ['enemies', 'arrows', 'bolts', 'balls', 'zaps', 'loot', 'drops', 'queue', 'soldiers']) G[k] = [];
   G.raid = null; G.bossRef = null; G.map = null; G.coins = 15 * META.gold; G.wave = G.cleared = G.checkpoint; G.runStart = G.wave; G.runKills = 0; G.combo = 0; G.fury = 0;
-  G.waveState = 'prep'; G.next = 8; G.preview = buildWave(G.wave + 1); G.state = 'play'; G.slow = 1; G.slowT = 0;
+  G.waveState = 'prep'; G.next = 15; G.preview = buildWave(G.wave + 1); G.state = 'play'; G.slow = 1; G.slowT = 0;
   for (const p of G.pads) if (p.type === 'wall' && p.lvl) { p.broken = false; p.hp = p.maxHp = towerStats(p).hp; rebuild(p); }
   fixKeep(); const h = G.hero; h.x = KEEP.x + 6; h.z = KEEP.z + 3; h.dead = 0; h.maxHp = h.hp = heroStats().hp;
   writeSave();
@@ -726,13 +815,13 @@ function startWave() {
 }
 function spawnEnemy(q) {
   const T = ETYPES[q.t], m = hpMult(G.wave) * (1 + 0.15 * G.empire);
-  const e = { t: q.t, T, p: q.p, s: q.p.start + rnd(-0.5, 0.5), dir: 1, off: q.off + rnd(-0.15, 0.15), hp: T.hp * m, max: T.hp * m, spd: T.spd * rnd(0.95, 1.05), walk: rnd(0, 6), flash: 0, atk: rnd(0.2, 0.8), swing: 0, alive: true, x: 0, z: 0, yaw: 0, coin: T.coin * coinMult(G.wave), dmg: T.dmg * Math.pow(1.1, G.wave - 1), fight: null, kb: 0 };
+  const e = { t: q.t, T, p: q.p, s: q.p.start + rnd(-0.5, 0.5), dir: 1, off: q.off + rnd(-0.15, 0.15), hp: T.hp * m, max: T.hp * m, spd: T.spd * 1.45 * rnd(0.95, 1.05), walk: rnd(0, 6), flash: 0, atk: rnd(0.2, 0.8), swing: 0, alive: true, x: 0, z: 0, yaw: 0, coin: T.coin * coinMult(G.wave), dmg: T.dmg * Math.pow(1.1, G.wave - 1), fight: null, kb: 0 };
   if (q.t === 'boss') { G.bossRef = e; shake(0.6); }
   const pp = pathPos(e.p, e.s); e.x = pp.x; e.z = pp.z;
   G.enemies.push(e);
 }
 function waveClear() {
-  G.cleared = G.wave; G.waveState = 'prep'; G.next = 8; G.preview = buildWave(G.wave + 1); G.preview.n = G.wave + 1;
+  G.cleared = G.wave; G.waveState = 'prep'; G.next = 15; G.preview = buildWave(G.wave + 1); G.preview.n = G.wave + 1;
   let mine = 0; for (const p of G.pads) if (p.type === 'mine' && p.lvl) mine += towerStats(p).pay;
   const forts = G.cap.filter(Boolean).length * Math.round(12 * coinMult(G.wave));
   const landCoins = worldPay();
@@ -740,7 +829,6 @@ function waveClear() {
   if (G.lv('market') && G.invest >= 1) { const add = Math.ceil(G.invest * towerStats(G.padMap.market).rate / 100); G.invest += add; toast('Investments grew +' + fmt(add), '#b99cff'); }
   if (G.lv('bank') && G.bank >= 1) { const st = towerStats(G.padMap.bank), add = Math.min(st.cap - G.bank, Math.ceil(G.bank * st.rate / 100)); if (add > 0) { G.bank += add; toast('Bank paid you +' + fmt(add), '#ffd23f'); } }
   if (G.wave % 5 === 0 && G.wave > G.checkpoint) { G.checkpoint = G.wave; toast('CHECKPOINT! If you lose, you restart here', '#7ee081'); }
-  if (G.wave === G.raidAfter || FORTS.some((f, i) => f.unlock === G.wave && !G.cap[i])) { const rf = raidFort(); if (rf) toast('NEW: you can attack the ' + rf.name + '!', '#ff8a7a'); }
   banner('WAVE ' + G.wave + ' CLEARED!', '+' + bonus + ' coins' + (mine ? ' (mine +' + mine + ')' : ''), '#7ee081', 2.2);
   AU.play('clear');
   dropCoins(KEEP.x + 3, KEEP.z + 4, bonus);
@@ -754,48 +842,51 @@ function waveClear() {
   checkGoals(); writeSave();
 }
 
-// ================= raids: lead your army to an enemy castle =================
-const raidFort = () => G.cleared < G.raidAfter ? null : FORTS.find((f, i) => !G.cap[i] && f.unlock <= G.cleared);
+// ================= raids: walk up to an enemy castle and the fight starts =================
 function guard(f, t, a, r) {
-  const T = ETYPES[t], m = Math.pow(hpMult(G.cleared + 1), 0.75) * (t === 'fort' ? 1 : 0.7) * (1 + 0.15 * G.empire), x = f.x + Math.cos(a) * r, z = f.z + Math.sin(a) * r;
-  return { t, T, p: f.path, s: f.path.start, dir: 1, off: 0, hp: T.hp * m, max: T.hp * m, spd: T.spd * rnd(0.95, 1.05), walk: rnd(0, 6), flash: 0, atk: rnd(0.2, 0.8), swing: 0, alive: true, x, z, yaw: 0, coin: T.coin * coinMult(G.cleared + 1), dmg: T.dmg * 0.7 * Math.pow(1.06, G.cleared), fight: null, kb: 0, free: true, stat: t === 'fort' };
+  const T = ETYPES[t], m = Math.pow(hpMult(f.pw + 1), 0.75) * (t === 'fort' ? (f.cap ? 2.4 : 1) : 0.7), x = f.x + Math.cos(a) * r, z = f.z + Math.sin(a) * r;
+  return { t, T, p: f.path || PATHS[0], s: (f.path || PATHS[0]).start, dir: 1, off: 0, hp: T.hp * m, max: T.hp * m, spd: T.spd * rnd(0.95, 1.05), walk: rnd(0, 6), flash: 0, atk: rnd(0.2, 0.8), swing: 0, alive: true, x, z, yaw: 0, coin: T.coin * coinMult(f.pw + 1), dmg: T.dmg * 0.7 * Math.pow(1.06, f.pw), fight: null, kb: 0, free: true, stat: t === 'fort' };
 }
+const dangerOf = c => { const d = c.pw - G.cleared; return d <= -3 ? ['EASY', '#7ee081'] : d <= 2 ? ['FAIR', '#ffd23f'] : d <= 8 ? ['HARD', '#ffb13d'] : ['DEADLY', '#ff6b4a']; };
 function startRaid(f) {
-  const h = G.hero, dx = 42 - f.x, dz = 24 - f.z, d = Math.hypot(dx, dz);
-  h.x = f.x + dx / d * 10; h.z = f.z + dz / d * 10; h.hp = h.maxHp; puff(h.x, 0.5, h.z, 10, '#cfe6ff', 1.2); ring(h.x, h.z, 4, '#7cc8ff');
-  const e = guard(f, 'fort', 0, 0); G.enemies.unshift(e); G.bossRef = e;
-  G.raid = { f, e, left: 8 + Math.floor(G.cleared / 2), spawnT: 0.2, endT: null };
+  const e = guard(f, 'fort', 0, 0); G.enemies.unshift(e); G.bossRef = e; const h = G.hero;
+  G.raid = { f, e, left: Math.min(40, 8 + Math.floor(f.pw * 0.6) + (f.cap ? 10 : 0)), spawnT: 0.2, endT: null };
   for (const k of G.soldiers) k.target = null;
-  banner('ATTACK!', 'Break the castle. Guards will fight back.', '#ff8a7a', 2); AU.play('horn'); shake(0.5);
+  // your troops march in with you
+  const st = G.bkTop ? towerStats(G.bkTop) : { hp: 90 };
+  for (let i = 0, n = Math.min(40, G.troops); i < n; i++) G.soldiers.push({ x: h.x + rnd(-5, 5), z: h.z + rnd(-5, 5), hp: st.hp, max: st.hp, alive: true, cd: 0, target: null, walk: 0, yaw: 0, respawn: 0, slot: G.soldiers.length, swing: 0, army: true });
+  banner(f.name, 'Break the castle! Walk away to leave.', '#ff8a7a', 2); AU.play('horn'); shake(0.5);
 }
 function updateRaid(dt) {
   const R = G.raid; if (!R) return;
   if (R.endT !== null) { R.endT -= dt; if (R.endT <= 0) endRaid(); return; }
-  if (G.hero.dead > 0) { toast('The attack failed. Try again when stronger!', '#ff8a7a'); endRaid(); return; }
+  if (G.hero.dead > 0) { toast('The attack failed. Grow stronger and come back!', '#ff8a7a'); endRaid(); return; }
+  if (dist(G.hero.x, G.hero.z, R.f.x, R.f.z) > 55) { toast('You left the fight.', '#ffffff'); endRaid(); return; }
   R.spawnT -= dt;
-  if (R.spawnT <= 0 && R.left > 0 && G.enemies.filter(e => e.free).length < 11) {
-    const n = Math.min(R.left, irnd(2, 4)), types = ['raider', 'raider', 'shield', 'archer']; if (G.cleared >= 8) types.push('brute');
-    for (let i = 0; i < n; i++) G.enemies.push(guard(R.f, pick(types), rnd(0, TAU), 5));
+  if (R.spawnT <= 0 && R.left > 0 && G.enemies.filter(e => e.free).length < 12) {
+    const n = Math.min(R.left, irnd(2, 4)), types = ['raider', 'raider', 'shield', 'archer']; if (R.f.pw >= 8) types.push('brute');
+    for (let i = 0; i < n; i++) G.enemies.push(guard(R.f, pick(types), rnd(0, TAU), 6 * R.f.sz));
     R.left -= n; R.spawnT = 3; puff(R.f.x, 0.5, R.f.z, 6, '#8a7d70', 1.4);
   }
 }
 function endRaid() {
   for (const e of G.enemies) if (e.free) e.alive = false; G.enemies = G.enemies.filter(e => e.alive);
-  G.raid = null; G.bossRef = null; G.next = 8;
-  const h = G.hero; if (h.dead <= 0) { h.x = KEEP.x + 6; h.z = KEEP.z + 3; puff(h.x, 0.5, h.z, 8, '#cfe6ff', 1); }
-  writeSave();
+  G.soldiers = G.soldiers.filter(k => !k.army);
+  G.raid = null; G.bossRef = null; writeSave();
 }
 function captureFort(e) {
-  const R = G.raid, i = FORTS.indexOf(R.f); G.cap[i] = true; G.raidAfter = G.cleared + 2; R.endT = 3; R.left = 0; syncForts();
-  for (const p of G.pads) if (p.fort === i) { p.shown = true; p.appear = 0; }
+  const R = G.raid, f = R.f; if (f.fi !== undefined) G.cap[f.fi] = true; else G.world[f.id] = 1;
+  R.endT = 3; R.left = 0; syncForts(); reveal(f.x, f.z, 90);
+  for (const p of G.pads) if (p.fort === f.fi && f.fi !== undefined || p.land === f.id) { p.shown = true; p.appear = 0; }
   for (const g of G.enemies) if (g.free && g.alive && g !== e) kill(g);
   for (const c of G.loot) c.rush = true;
-  META.crowns += 5; shake(1.2); G.flash = 0.6; G.slow = 0.4; G.slowT = 0.8;
-  banner('CASTLE CAPTURED!', 'Road safe  ·  +5 crowns  ·  new town to build up there', '#7ee081', 3); AU.play('clear');
-  burst(R.f.x, 6, R.f.z, 60, ['#ffd23f', '#3b82f6', '#ffffff'], 10, 0.35, 1.2);
-  if (G.cap.every(Boolean)) { META.crowns += 20; toast('HOME VALE IS YOURS! +20 crowns. Open the MAP!', '#ffd23f'); }
+  const crowns = f.cap ? 12 : 4, loot = 15 + f.pw * 3; META.crowns += crowns; G.wood += loot; G.stone += loot; shake(1.2); G.flash = 0.6; G.slow = 0.4; G.slowT = 0.8;
+  banner(f.cap ? 'CAPITAL TAKEN!' : 'CASTLE TAKEN!', '+' + crowns + ' crowns  ·  +' + loot + ' wood and stone  ·  a new town opens here', '#7ee081', 3); AU.play('clear');
+  burst(f.x, 6, f.z, 60, ['#ffd23f', '#3b82f6', '#ffffff'], 10, 0.35, 1.2);
+  if (f.fi !== undefined && G.cap.every(Boolean)) { META.crowns += 20; toast('HOME VALE IS FREE! +20 crowns', '#ffd23f'); }
+  if (G.target && G.target.c === f) G.target = null;
   G.preview = buildWave(G.cleared + 1); saveMeta();
-  BOTLOG.push('CAPTURED ' + R.f.name + ' w' + G.cleared + ' t' + Math.floor(G.t));
+  BOTLOG.push('TOOK ' + f.name + ' w' + G.cleared + ' t' + Math.floor(G.t));
 }
 
 // ================= combat =================
@@ -803,7 +894,7 @@ const aimY = e => 0.95 * e.T.sc;
 function hurt(e, d, kind) {
   if (!e.alive) return;
   if (kind === 'arrow' && e.T.armor) d *= e.T.armor;
-  d *= 1 + 0.1 * G.cap.filter(Boolean).length + 0.1 * WORLD.filter(n => n.cap && G.world[n.id]).length;
+  d *= 1 + 0.1 * G.cap.filter(Boolean).length + 0.1 * LANDS.filter(n => n.cap && G.world[n.id]).length;
   let crit = false; if ((kind === 'arrow' || kind === 'sword') && Math.random() < 0.12) { d *= 2; crit = true; }
   e.hp -= d; e.flash = 0.09;
   if (e.hp <= 0 && kind === 'sword') { G.combo++; G.comboT = 1.8; G.comboPop = 1; if (G.combo % 10 === 0) { dropCoins(G.hero.x, G.hero.z, 2 + G.combo / 5); toast('COMBO x' + G.combo + '! Bonus coins', '#ffb13d'); } if (G.combo % 25 === 0) { G.fury = 6; banner('FURY!', 'Double damage, longer reach', '#ff8a3d', 1.4); AU.play('horn'); } }
@@ -876,10 +967,10 @@ function update(dt) {
     if (h.dead <= 0) { h.x = KEEP.x + 5; h.z = KEEP.z + 3; h.hp = h.maxHp; puff(h.x, 0.5, h.z, 8, '#cfe6ff', 1); ring(h.x, h.z, 3, '#7cc8ff'); }
   } else {
     h.moving = mag > 0.1;
-    const tvx = h.moving ? mx / mag * hs.spd * Math.min(1, mag) : 0, tvz = h.moving ? mz / mag * hs.spd * Math.min(1, mag) : 0;
+    const rsp = hs.spd * (roadAt(h.x, h.z) ? 1.4 : 1.1), tvx = h.moving ? mx / mag * rsp * Math.min(1, mag) : 0, tvz = h.moving ? mz / mag * rsp * Math.min(1, mag) : 0;
     h.vx = lerp(h.vx, tvx, Math.min(1, dt * 14)); h.vz = lerp(h.vz, tvz, Math.min(1, dt * 14));
-    h.x = clamp(h.x + h.vx * dt, 1, MAPW - 1); h.z = clamp(h.z + h.vz * dt, 1, MAPH - 1);
-    for (const f of FORTS) if (dist(h.x, h.z, f.x, f.z) < 4) { const a = Math.atan2(h.z - f.z, h.x - f.x); h.x = f.x + Math.cos(a) * 4; h.z = f.z + Math.sin(a) * 4; }
+    { const nx = clamp(h.x + h.vx * dt, 6, MAPW - 6), nz = clamp(h.z + h.vz * dt, 6, MAPH - 6); if (edgeOf(nx, nz) > 18) { h.x = nx; h.z = nz; } else if (edgeOf(nx, h.z) > 18) h.x = nx; else if (edgeOf(h.x, nz) > 18) h.z = nz; }
+    for (const f of CASTLES) { const r = 4 * f.sz; if (Math.abs(h.x - f.x) < r && dist(h.x, h.z, f.x, f.z) < r) { const a = Math.atan2(h.z - f.z, h.x - f.x); h.x = f.x + Math.cos(a) * r; h.z = f.z + Math.sin(a) * r; } }
     if (dist(h.x, h.z, KEEP.x, KEEP.z) < 5.2) { const a = Math.atan2(h.z - KEEP.z, h.x - KEEP.x); h.x = KEEP.x + Math.cos(a) * 5.2; h.z = KEEP.z + Math.sin(a) * 5.2; }
     if (h.moving) { h.face = Math.atan2(h.vx, h.vz); h.walk += dt * 13; G.moved += hs.spd * dt * Math.min(1, mag); if (G.tut === 0 && G.moved > 6) G.tut = 1; }
     h.lagX = lerp(h.lagX, -h.vx * 0.04, Math.min(1, dt * 6)); h.lagZ = lerp(h.lagZ, -h.vz * 0.04, Math.min(1, dt * 6));
@@ -887,7 +978,7 @@ function update(dt) {
     h.regenT += dt; if (h.regenT > 2.5 && h.hp < h.maxHp) h.hp = Math.min(h.maxHp, h.hp + h.maxHp * 0.06 * dt);
     // sword
     h.cd -= dt; h.swing = Math.max(0, h.swing - dt * 3.2);
-    const tgt = nearestIn(h.x, h.z, hs.reach + 0.6) || (G.raid && G.raid.e.alive && dist(h.x, h.z, G.raid.f.x, G.raid.f.z) < hs.reach + 2.4 ? G.raid.e : null);
+    const tgt = nearestIn(h.x, h.z, hs.reach + 0.6) || (G.raid && G.raid.e.alive && dist(h.x, h.z, G.raid.f.x, G.raid.f.z) < hs.reach + 2.4 * G.raid.f.sz ? G.raid.e : null);
     if (tgt) { if (!h.moving) h.face = Math.atan2(tgt.x - h.x, tgt.z - h.z); if (h.cd <= 0) { h.cd = 1 / hs.rate; h.swing = 1; AU.play('swing'); let n = 0; for (const e of G.enemies) if (e.alive && dist(e.x, e.z, h.x, h.z) < hs.reach + e.T.r && n++ < 8) { hurt(e, hs.dmg, 'sword'); if (e.t !== 'boss' && e.t !== 'brute' && !e.free) e.kb = 0.5; } burst(h.x + Math.sin(h.face) * 1.4, 1, h.z + Math.cos(h.face) * 1.4, 5, ['#ffffff', '#cfe6ff'], 4, 0.12, 0.3); } }
   }
   // pads: stand on one to pay coins from your stack
@@ -920,10 +1011,10 @@ function update(dt) {
   }
   // stop by trees or rocks to gather
   if (h.dead <= 0 && !h.moving && !G.raid) {
-    const n = NODES.find(q => dist(h.x, h.z, q.x, q.z) < 3.8);
+    const n = NODES.find(q => dist(h.x, h.z, q.x, q.z) < 4.2);
     if (n) {
       h.face = Math.atan2(n.x - h.x, n.z - h.z); G.gatherT += dt;
-      if (G.gatherT >= 0.5) { G.gatherT = 0; const amt = 1 + Math.floor(G.cleared / 10); G[n.k] += amt; h.swing = 1; num(n.x, 3, n.z, '+' + amt + ' ' + n.k, n.k === 'wood' ? '#8fd37a' : '#dfe3ea', 26); burst(n.x, 1.2, n.z, 5, n.k === 'wood' ? ['#9c6b3e', '#2f8a4a'] : ['#bdb6aa', '#8f887c'], 4, 0.14, 0.4); AU.play('hit'); }
+      if (G.gatherT >= 0.5) { G.gatherT = 0; const amt = (1 + Math.floor(G.cleared / 10)) * (n.rich ? 3 : 1); G[n.k] += amt; h.swing = 1; num(n.x, 3, n.z, '+' + amt + ' ' + n.k, n.k === 'wood' ? '#8fd37a' : '#dfe3ea', 26); burst(n.x, 1.2, n.z, 5, n.k === 'wood' ? ['#9c6b3e', '#2f8a4a'] : ['#bdb6aa', '#8f887c'], 4, 0.14, 0.4); AU.play('hit'); }
     }
   }
   // workers walk to the trees and rocks and bring it back
@@ -932,12 +1023,19 @@ function update(dt) {
     while (G.workers.length < cst.n) G.workers.push({ x: camp.x, z: camp.z, st: 0, t: 0, walk: 0, yaw: 0, node: NODES[G.workers.length % 4] });
     for (const w of G.workers) {
       const q = w.st === 0 ? w.node : camp, d = dist(w.x, w.z, q.x, q.z);
-      if (d > 2.6) { const sp = 7 * dt; w.x += (q.x - w.x) / d * sp; w.z += (q.z - w.z) / d * sp; w.walk += dt * 12; w.yaw = Math.atan2(q.x - w.x, q.z - w.z); }
+      if (d > 3) { const sp = 12 * dt; w.x += (q.x - w.x) / d * sp; w.z += (q.z - w.z) / d * sp; w.walk += dt * 12; w.yaw = Math.atan2(q.x - w.x, q.z - w.z); }
       else if (w.st === 0) { w.t += dt; if (w.t > 2.5) { w.t = 0; w.st = 1; } }
       else { G[w.node.k] += cst.load; w.st = 0; }
     }
   }
   G.goalT -= dt; if (G.goalT <= 0) { G.goalT = 0.5; checkGoals(); }
+  // the wide world: new places, chests, castles you walk up to
+  G.away = dist(h.x, h.z, KEEP.x, KEEP.z) > 140;
+  G.seenT -= dt; if (G.seenT <= 0) { G.seenT = 0.4; reveal(h.x, h.z, 95); const r = realmAt(h.x, h.z); if (r !== G.realm) { G.realm = r; banner(REALMS[r].name, REALMS[r].sub, '#ffffff', 2.4); AU.play('wave'); } }
+  CHESTS.forEach((c, i) => { if (c.mesh.visible && dist(h.x, h.z, c.x, c.z) < 3.2 && h.dead <= 0) openChest(c, i); });
+  if (G.target && !G.target.c && dist(h.x, h.z, G.target.x, G.target.z) < 18) G.target = null;
+  if (!G.raid && h.dead <= 0) { const c = CASTLES.find(c => !isOurs(c) && dist(h.x, h.z, c.x, c.z) < 7 + 8 * c.sz); if (c) startRaid(c); }
+  if (G.bkTop && h.dead <= 0 && !h.moving && Math.abs(h.x - TRAIN_Z.x) < PAD_SIZE / 2 + 0.3 && Math.abs(h.z - TRAIN_Z.z) < PAD_SIZE / 2 + 0.3) { G.trainT -= dt; if (G.trainT <= 0) { G.trainT = 0.5; if (trainTroops()) num(TRAIN_Z.x, 2, TRAIN_Z.z, '+' + TRAIN.n + ' troops', '#8ab4ff', 26); else if (!G.trainMsg) { G.trainMsg = true; toast('Need ' + TRAIN.wood + ' wood and ' + TRAIN.stone + ' stone', '#ffffff'); } } } else G.trainMsg = false;
   if (G.lv('bank') && h.dead <= 0) {
     const st = towerStats(G.padMap.bank), near = q => Math.abs(h.x - q.x) < PAD_SIZE / 2 + 0.3 && Math.abs(h.z - q.z) < PAD_SIZE / 2 + 0.3;
     G.bankT -= dt;
@@ -964,7 +1062,7 @@ function update(dt) {
     const tx = h.x + Math.sin(back) * row * 1.2 + Math.cos(back) * colm * 1.1, tz = h.z + Math.cos(back) * row * 1.2 - Math.sin(back) * colm * 1.1;
     const d = dist(f.x, f.z, tx, tz);
     if (d > 0.15) { const sp = Math.min(d, (hs.spd + 2) * dt); f.x += (tx - f.x) / d * sp; f.z += (tz - f.z) / d * sp; f.walk += dt * 12; f.yaw = Math.atan2(tx - f.x, tz - f.z); }
-    if (d > 12) { f.x = tx; f.z = tz; }
+    if (d > 25) { f.x = tx; f.z = tz; }
     f.cd -= dt; f.swing = Math.max(0, f.swing - dt * 4);
     const st = towerStats(G.padMap.recruit), e = nearestIn(f.x, f.z, st.range);
     if (e) { f.yaw = Math.atan2(e.x - f.x, e.z - f.z); if (f.cd <= 0) { f.cd = 1 / st.rate; f.swing = 1; fireArrow(f.x, 1.2, f.z, e, st.dmg); AU.play('shoot'); } }
@@ -1010,8 +1108,8 @@ function update(dt) {
   const bks = G.pads.filter(p => p.type === 'barracks' && p.lvl);
   if (bks.length) {
     G.bkTop = bks.reduce((a, b) => b.lvl > a.lvl ? b : a); const st = towerStats(G.bkTop); let n = Math.floor(landsOwned() / 3); for (const b of bks) n += towerStats(b).n;
-    n = Math.min(n, 80);
-    while (G.soldiers.length < n) G.soldiers.push({ x: G.bkTop.x, z: G.bkTop.z, hp: st.hp, max: st.hp, alive: true, cd: 0, target: null, walk: 0, yaw: 0, respawn: 0, slot: G.soldiers.length, swing: 0 });
+    n = Math.min(n, 90); let have = 0; for (const k of G.soldiers) if (!k.army) have++;
+    for (; have < n; have++) G.soldiers.push({ x: G.bkTop.x, z: G.bkTop.z, hp: st.hp, max: st.hp, alive: true, cd: 0, target: null, walk: 0, yaw: 0, respawn: 0, slot: G.soldiers.length, swing: 0 });
     for (const k of G.soldiers) k.max = st.hp;
   }
   // spawning
@@ -1067,19 +1165,22 @@ function update(dt) {
   const bk = G.bkTop || G.padMap.bk;
   for (const k of G.soldiers) {
     k.swing = Math.max(0, k.swing - dt * 4);
+    if (!k.alive && k.army) { G.troops = Math.max(0, G.troops - 1); k.gone = true; continue; }
     if (!k.alive) { k.respawn -= dt; if (k.respawn <= 0) { k.alive = true; k.hp = k.max; k.x = bk.x; k.z = bk.z; puff(k.x, 0.4, k.z, 4); } continue; }
-    const home = G.raid ? { x: h.x + (k.slot % 6 - 2.5) * 1.5, z: h.z + 2 + Math.floor(k.slot / 6) * 1.3 } : { x: 33 + (k.slot % 8) * 0.9, z: 24 + (k.slot % 2 ? 1.6 : -1.6) * (1 + Math.floor(k.slot / 8) * 0.6) };
+    const follow = G.raid || (G.away && G.waveState === 'prep'), home = follow ? { x: h.x + (k.slot % 6 - 2.5) * 1.5, z: h.z + 2 + Math.floor(k.slot / 6) * 1.3 } : { x: wx(33) + (k.slot % 8) * 1.3, z: wz(24) + (k.slot % 2 ? 2.4 : -2.4) * (1 + Math.floor(k.slot / 8) * 0.6) };
     if (k.target && (!k.target.alive || dist(k.target.x, k.target.z, home.x, home.z) > 13)) { if (k.target.fight === k) k.target.fight = null; k.target = null; }
     if (!k.target) { let b = null, bd = 12; for (const e of G.enemies) { if (!e.alive || e.t === 'imp' || (e.T.ranged && !e.stat)) continue; const d = dist(e.x, e.z, home.x, home.z) + (e.fight ? 4 : 0); if (d < bd) { bd = d; b = e; } } k.target = b; }
     const tx = k.target ? k.target.x - Math.sin(k.target.yaw) * -(k.target.T.r + 0.7) : home.x, tz = k.target ? k.target.z - Math.cos(k.target.yaw) * -(k.target.T.r + 0.7) : home.z;
     const d = dist(k.x, k.z, tx, tz);
-    if (d > 0.2) { const sp = Math.min(d, (G.raid ? 13 : 6) * dt); k.x += (tx - k.x) / d * sp; k.z += (tz - k.z) / d * sp; k.walk += dt * 12; k.yaw = Math.atan2(tx - k.x, tz - k.z); }
+    if (d > 60) { k.x = tx; k.z = tz; }
+    if (d > 0.2) { const sp = Math.min(d, (follow ? 15 : 9) * dt); k.x += (tx - k.x) / d * sp; k.z += (tz - k.z) / d * sp; k.walk += dt * 12; k.yaw = Math.atan2(tx - k.x, tz - k.z); }
     if (k.target && dist(k.x, k.z, k.target.x, k.target.z) < k.target.T.r + 1.4) {
       if (!k.target.fight) k.target.fight = k;
       k.yaw = Math.atan2(k.target.x - k.x, k.target.z - k.z);
       k.cd -= dt; if (k.cd <= 0) { k.cd = 0.8; k.swing = 1; hurt(k.target, towerStats(bk).dmg, 'melee'); }
     }
   }
+  if (G.soldiers.some(k => k.gone)) G.soldiers = G.soldiers.filter(k => !k.gone);
   // projectiles
   for (const a of G.arrows) {
     a.k += dt / a.dur; if (a.e && a.e.alive) { a.tx = a.e.x; a.ty = aimY(a.e); a.tz = a.e.z; }
@@ -1129,8 +1230,7 @@ function update(dt) {
   G.coinPulse = Math.max(0, G.coinPulse - dt * 4); G.flash = Math.max(0, G.flash - dt * 2);
   // wave flow
   if (G.waveState === 'prep') {
-    if ((AUTO || SIM) && !G.raid && G.aiRaid !== G.cleared && raidFort() && G.next < 6) { G.aiRaid = G.cleared; startRaid(raidFort()); BOTLOG.push('raid start w' + G.cleared + ' t' + Math.floor(G.t)); }
-    if (!G.raid) { if (G.tut >= 3 || G.wave > 0 || AUTO || SIM) G.next -= dt; if (G.next <= 0) startWave(); }
+    if (!G.raid && !G.away) { if (G.tut >= 3 || G.wave > 0 || AUTO || SIM) G.next -= dt; if (G.next <= 0) startWave(); } // waves wait while you are out exploring
   }
   else if (!G.queue.length && !G.enemies.some(e => e.t !== 'imp')) waveClear();
 }
@@ -1159,168 +1259,147 @@ function gameOver() {
   AU.play('over');
 }
 
-// ================= world map: a board of lands to conquer =================
-const REALMS = {
-  home: { name: 'HOME VALE', col: '#7cb95a', dark: '#4f8a3a', pay: '' },
-  forest: { name: 'DARK FOREST', col: '#3f8a54', dark: '#25603a', pay: 'wood' },
-  desert: { name: 'SAND WASTES', col: '#e3c16f', dark: '#b8923f', pay: 'coins' },
-  frost: { name: 'FROST PEAKS', col: '#bcdcec', dark: '#86aec6', pay: 'stone' },
-  fire: { name: 'FIRE LANDS', col: '#c8593a', dark: '#8a3320', pay: 'troops' },
-};
-const WORLD = [
-  { id: 'home', name: 'Your Keep', x: 0.06, y: 0.5, r: 'home' },
-  { id: 'c2', name: 'North Castle', x: 0.16, y: 0.2, r: 'home', fort: 2 }, { id: 'c3', name: 'South Castle', x: 0.16, y: 0.8, r: 'home', fort: 3 },
-  { id: 'c0', name: 'East Castle', x: 0.24, y: 0.38, r: 'home', fort: 0 }, { id: 'c1', name: 'S-East Castle', x: 0.24, y: 0.62, r: 'home', fort: 1 },
-  { id: 'f1', name: 'Pinewatch', x: 0.34, y: 0.1, r: 'forest', def: 15 }, { id: 'f2', name: 'Oak Hollow', x: 0.5, y: 0.07, r: 'forest', def: 25 }, { id: 'f3', name: 'Mossford', x: 0.4, y: 0.27, r: 'forest', def: 30 }, { id: 'fc', name: 'Forest Capital', x: 0.57, y: 0.21, r: 'forest', def: 60, cap: true },
-  { id: 'd1', name: 'Dune Gate', x: 0.34, y: 0.9, r: 'desert', def: 40 }, { id: 'd2', name: 'Red Oasis', x: 0.5, y: 0.93, r: 'desert', def: 50 }, { id: 'd3', name: 'Sunspire', x: 0.4, y: 0.73, r: 'desert', def: 60 }, { id: 'dc', name: 'Desert Capital', x: 0.57, y: 0.79, r: 'desert', def: 110, cap: true },
-  { id: 'i1', name: 'Coldwater', x: 0.4, y: 0.5, r: 'frost', def: 70 }, { id: 'i2', name: 'Ice Pass', x: 0.54, y: 0.41, r: 'frost', def: 80 }, { id: 'i3', name: 'Whitecliff', x: 0.54, y: 0.59, r: 'frost', def: 90 }, { id: 'ic', name: 'Frost Capital', x: 0.67, y: 0.5, r: 'frost', def: 170, cap: true },
-  { id: 'x1', name: 'Ash Fields', x: 0.75, y: 0.17, r: 'fire', def: 130 }, { id: 'x2', name: 'Lava Bay', x: 0.75, y: 0.83, r: 'fire', def: 150 }, { id: 'x3', name: 'Ember Rift', x: 0.8, y: 0.5, r: 'fire', def: 170 }, { id: 'xc', name: "Emperor's Throne", x: 0.93, y: 0.5, r: 'fire', def: 500, cap: true },
-];
-const WN = {}; for (const n of WORLD) { WN[n.id] = n; n.links = []; }
-for (const [a, b] of [['home', 'c0'], ['home', 'c1'], ['home', 'c2'], ['home', 'c3'], ['c0', 'c1'], ['c2', 'c0'], ['c3', 'c1'], ['c2', 'f1'], ['c0', 'f3'], ['f1', 'f2'], ['f1', 'f3'], ['f2', 'fc'], ['f3', 'fc'], ['c3', 'd1'], ['c1', 'd3'], ['d1', 'd2'], ['d1', 'd3'], ['d2', 'dc'], ['d3', 'dc'], ['c0', 'i1'], ['c1', 'i1'], ['i1', 'i2'], ['i1', 'i3'], ['i2', 'ic'], ['i3', 'ic'], ['f3', 'i2'], ['d3', 'i3'], ['fc', 'x1'], ['dc', 'x2'], ['ic', 'x3'], ['x1', 'x3'], ['x2', 'x3'], ['x1', 'xc'], ['x2', 'xc'], ['x3', 'xc']]) { WN[a].links.push(b); WN[b].links.push(a); }
-const nodeOwned = n => n.id === 'home' || (n.fort !== undefined ? G.cap[n.fort] : G.world[n.id] > 0);
-const landsOwned = () => WORLD.filter(n => n.def && G.world[n.id] > 0).length;
-const canReach = n => !nodeOwned(n) && n.links.some(l => nodeOwned(WN[l]));
-const landDef = n => Math.max(1, n.def - (G.wdmg[n.id] || 0));
-const buildCost = n => 30 * (G.world[n.id] || 1) * (n.cap ? 2 : 1);
+// ================= world pay, chests, map =================
+const landsOwned = () => LANDS.filter(n => G.world[n.id] > 0).length;
 const TRAIN = { n: 5, wood: 20, stone: 10 };
 function worldPay() {
   let coins = 0, wood = 0, stone = 0, troops = 1; for (const p of G.pads) if (p.type === 'barracks' && p.lvl) troops += Math.ceil(p.lvl / 2);
   for (const p of G.pads) { if (p.type === 'lumber' && p.lvl) wood += towerStats(p).pay; if (p.type === 'quarry' && p.lvl) stone += towerStats(p).pay; }
-  for (const n of WORLD) {
-    const lv = n.def ? G.world[n.id] || 0 : 0; if (!lv) continue; const m = lv * (n.cap ? 3 : 1), k = REALMS[n.r].pay;
+  for (const n of LANDS) {
+    const lv = G.world[n.id] || 0; if (!lv) continue; const m = lv * (n.cap ? 3 : 1), k = REALMS[n.r].pay;
     if (k === 'wood') wood += 5 * m; else if (k === 'stone') stone += 5 * m; else if (k === 'troops') troops += 2 * m; else if (k === 'coins') coins += Math.round(15 * m * coinMult(G.wave));
   }
   G.wood += wood; G.stone += stone; G.troops += troops;
   toast('+' + troops + ' troops' + (wood ? '  +' + wood + ' wood' : '') + (stone ? '  +' + stone + ' stone' : ''), '#8fd37a');
   return coins;
 }
-function winLand(n) {
-  G.world[n.id] = 1; delete G.wdmg[n.id]; const crowns = n.cap ? 10 : 2; META.crowns += crowns; const loot = Math.round(n.def / 2); G.wood += loot; G.stone += loot;
-  AU.play('clear'); saveMeta(); return crowns;
-}
 function trainTroops() {
-  if (G.wood < TRAIN.wood || G.stone < TRAIN.stone) { AU.play('hurt'); return false; }
-  G.wood -= TRAIN.wood; G.stone -= TRAIN.stone; G.troops += TRAIN.n; AU.play('build'); writeSave(); return true;
+  if (G.wood < TRAIN.wood || G.stone < TRAIN.stone) return false;
+  G.wood -= TRAIN.wood; G.stone -= TRAIN.stone; G.troops += TRAIN.n; AU.play('build'); return true;
 }
-function startBattle(n) {
-  if (G.troops < 1) { AU.play('hurt'); return; }
-  G.map.battle = { id: n.id, def: landDef(n), t: 0.3, a: [], d: [], end: 0, won: false, msg: '' }; AU.play('horn');
+function openChest(c, i) {
+  c.mesh.visible = false; G.chests.push(i); burst(c.x, 1.2, c.z, 30, ['#ffd23f', '#fff3a8', '#9c6b3e'], 7, 0.2, 0.8); puff(c.x, 0.5, c.z, 6, '#fff3a8', 1); AU.play('clear');
+  const big = 1 + G.cleared * 0.4, wood = Math.round(25 * big), crown = i % 3 === 0; dropCoins(c.x, c.z, 40 * big); G.wood += wood; G.stone += wood; if (crown) META.crowns += 2;
+  toast('CHEST! +' + wood + ' wood and stone' + (crown ? ' +2 crowns' : ''), '#ffd23f'); saveMeta();
 }
-function mapTick(dt) {
-  const b = G.map && G.map.battle; if (!b) return;
-  if (b.end > 0) { b.end -= dt; if (b.end <= 0) { G.map.battle = null; writeSave(); } return; }
-  b.t -= dt; if (b.t > 0) return; b.t = 0.45;
-  const n = WN[b.id], roll = c => Array.from({ length: c }, () => irnd(1, 6)).sort((x, y) => y - x);
-  b.a = roll(Math.min(3, G.troops)); b.d = roll(Math.min(2, b.def)); if (n.cap) b.d[0] = Math.min(7, b.d[0] + 1);
-  for (let i = 0; i < Math.min(b.a.length, b.d.length); i++) { if (b.a[i] > b.d[i]) b.def--; else G.troops--; }
-  G.wdmg[n.id] = n.def - b.def; AU.play('hit');
-  if (b.def <= 0) { const c = winLand(n); b.won = true; b.end = 1.8; b.msg = 'CONQUERED!  +' + c + ' crowns  +' + Math.round(n.def / 2) + ' wood and stone'; G.map.sel = null; }
-  else if (G.troops <= 0) { b.end = 1.8; b.msg = 'Out of troops. Their losses stay. Come back!'; AU.play('hurt'); }
-}
-const mapXY = n => ({ x: 40 + n.x * (UW - 80), y: 104 + n.y * (UH - 104 - 158) });
-const MB = () => ({ close: { x: UW - 50, y: 48, r: 34 }, train: { x: 170, y: UH - 78, w: 300, h: 92 }, act: { x: UW - 180, y: UH - 78, w: 320, h: 92 } });
+const mapView = () => { const a = UW / UH, D = Math.max(690 / (0.728 * a), 470 / 0.728); return { y: D * 0.93, z: D * 0.36 }; };
+const MB = () => ({ close: { x: UW - 50, y: 48, r: 34 }, act: { x: UW - 190, y: UH - 78, w: 320, h: 92 } });
 const inBtn = (p, b) => Math.abs(p.x - b.x) < b.w / 2 && Math.abs(p.y - b.y) < b.h / 2;
+function closeMap() { if (G.map) G.map.closing = true; }
+function travelTo(c) {
+  const h = G.hero, x = c.x, z = c.z + 12 * (c.sz || 1); h.x = x; h.z = z; h.vx = h.vz = 0; G.cam.x = x; G.cam.z = z; G.realm = realmAt(x, z);
+  for (const f of G.followers) { f.x = x; f.z = z; } puff(x, 0.5, z, 12, '#cfe6ff', 1.2); ring(x, z, 4, '#7cc8ff'); AU.play('tap'); G.map = null;
+}
 function mapTap(p) {
-  const M = G.map, B = MB();
-  if (M.battle) { if (!M.battle.end && inBtn(p, B.act)) { M.battle = null; writeSave(); AU.play('tap'); } return; }
-  if (dist(p.x, p.y, B.close.x, B.close.y) < B.close.r + 10) { G.map = null; AU.play('tap'); return; }
-  if (inBtn(p, B.train)) { trainTroops(); return; }
-  const sel = M.sel && WN[M.sel];
+  const M = G.map, B = MB(); if (M.closing) return;
+  if (dist(p.x, p.y, B.close.x, B.close.y) < B.close.r + 10) { closeMap(); AU.play('tap'); return; }
+  const sel = M.sel;
   if (sel && inBtn(p, B.act)) {
-    if (sel.fort !== undefined && !nodeOwned(sel)) { if (raidFort() === FORTS[sel.fort]) { G.map = null; startRaid(FORTS[sel.fort]); } else AU.play('hurt'); return; }
-    if (canReach(sel)) return startBattle(sel);
-    if (sel.def && G.world[sel.id] > 0 && G.world[sel.id] < 3) { const c = buildCost(sel); if (G.wood >= c && G.stone >= c) { G.wood -= c; G.stone -= c; G.world[sel.id]++; AU.play('build'); writeSave(); } else AU.play('hurt'); }
+    if (sel === KEEP || isOurs(sel)) { if (!G.raid) travelTo(sel); } else { G.target = { x: sel.x, z: sel.z, c: sel, name: sel.name }; closeMap(); AU.play('tap'); }
     return;
   }
-  for (const n of WORLD) { const q = mapXY(n); if (dist(p.x, p.y, q.x, q.y) < 58) { M.sel = n.id; AU.play('tap'); return; } }
-  M.sel = null;
+  let best2 = null, bd = 60;
+  for (const c of [KEEP, ...CASTLES]) { if (c !== KEEP && !isSeen(c.x, c.z)) continue; const s = toUI(c.x, 6, c.z), d = dist(p.x, p.y, s.x, s.y); if (d < bd) { bd = d; best2 = c; } }
+  M.sel = best2; if (best2) AU.play('tap');
 }
-function drawDie(x, y, v, col) { rr(ctx, x - 30, y - 30, 60, 60, 12); ctx.fillStyle = col; ctx.fill(); ctx.lineWidth = 4; ctx.strokeStyle = OUT; ctx.stroke(); txt('' + v, x, y + 2, 38, '#fff'); }
 function drawMap() {
-  const M = G.map, B = MB(), gr = ctx.createLinearGradient(0, 0, 0, UH); gr.addColorStop(0, '#2c6a8c'); gr.addColorStop(1, '#1f4d6b'); ctx.fillStyle = gr; ctx.fillRect(0, 0, UW, UH);
-  for (const n of WORLD) { const q = mapXY(n); ell(ctx, q.x, q.y, 118, 118); ctx.fillStyle = REALMS[n.r].dark; ctx.fill(); }
-  for (const n of WORLD) { const q = mapXY(n); ell(ctx, q.x, q.y, 106, 106); ctx.fillStyle = REALMS[n.r].col; ctx.fill(); }
-  ctx.setLineDash([14, 12]); ctx.lineWidth = 5; ctx.strokeStyle = 'rgba(255,245,220,0.75)';
-  for (const n of WORLD) for (const l of n.links) if (n.id < l) { const a = mapXY(n), c = mapXY(WN[l]); ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(c.x, c.y); ctx.stroke(); }
-  ctx.setLineDash([]);
-  for (const n of WORLD) {
-    const q = mapXY(n), own = nodeOwned(n), reach = canReach(n), R = n.cap || n.id === 'home' ? 46 : 38, lv = G.world[n.id] || 0;
-    if (M.sel === n.id) { ell(ctx, q.x, q.y, R + 12, R + 12); ctx.fillStyle = '#ffd23f'; ctx.fill(); }
-    else if (reach) { const pu = 6 + Math.sin(G.t * 5 + q.x) * 3 + 3; ell(ctx, q.x, q.y, R + pu, R + pu); ctx.fillStyle = 'rgba(255,90,70,0.45)'; ctx.fill(); }
-    ell(ctx, q.x, q.y, R, R); ctx.fillStyle = own ? '#2f6fe0' : reach ? '#d93a2b' : '#5a5560'; ctx.fill(); ctx.lineWidth = 5; ctx.strokeStyle = OUT; ctx.stroke();
-    const label = n.id === 'home' ? '♜' : n.fort !== undefined ? (own ? '♜' : '⚔') : own ? '★'.repeat(lv) : '' + landDef(n);
-    txt(label, q.x, q.y + 2, own && lv > 1 ? 22 : n.cap ? 34 : 30, '#fff');
-    txt(n.name, q.x, q.y + R + 18, 20, '#fff', 'center', 5);
+  const M = G.map, B = MB(), k = M.k; if (k < 0.5) return; ctx.globalAlpha = (k - 0.5) * 2;
+  const cen = { forest: [395, 45], desert: [395, 335], frost: [505, 190], fire: [110, 60] };
+  for (const r in cen) if (isSeen(cen[r][0], cen[r][1])) { const s = toUI(cen[r][0], 0, cen[r][1]); ctx.globalAlpha *= 0.75; txt(REALMS[r].name, s.x, s.y, 34, '#ffffff', 'center', 6); ctx.globalAlpha = (k - 0.5) * 2; }
+  const K0 = toUI(KEEP.x, 8, KEEP.z), K = { x: K0.x, y: K0.y + 34 }; rr(ctx, K.x - 40, K.y - 16, 80, 30, 12); ctx.fillStyle = '#2f6fe0'; ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = OUT; ctx.stroke(); txt('HOME', K.x, K.y, 18, '#fff', 'center', 3);
+  for (const c of CASTLES) {
+    if (!isSeen(c.x, c.z)) continue; const s = toUI(c.x, 8, c.z), own = isOurs(c), sel = M.sel === c, w = c.cap ? 38 : 28;
+    ell(ctx, s.x, s.y, sel ? w + 8 : w, sel ? w + 8 : w); ctx.fillStyle = sel ? '#ffd23f' : 'rgba(0,0,0,0)'; ctx.fill();
+    ell(ctx, s.x, s.y, w, w); ctx.fillStyle = own ? '#2f6fe0' : '#d93a2b'; ctx.fill(); ctx.lineWidth = 4; ctx.strokeStyle = OUT; ctx.stroke();
+    txt(own ? '★' : '⚔', s.x, s.y + 2, c.cap ? 34 : 26, '#fff', 'center', 3);
+    if (!own) { const [dw, dc] = dangerOf(c); txt(dw, s.x, s.y + w + 30, 15, dc, 'center', 3); }
+    txt(c.name, s.x, s.y + w + 13, 16, '#fff', 'center', 4);
   }
-  panel(18, 16, 760, 64, 26);
-  txt('COINS ' + fmt(G.coins), 40, 49, 26, '#ffd23f', 'left'); txt('WOOD ' + fmt(G.wood), 250, 49, 26, '#8fd37a', 'left'); txt('STONE ' + fmt(G.stone), 410, 49, 26, '#dfe3ea', 'left'); txt('TROOPS ' + fmt(G.troops), 590, 49, 26, '#8ab4ff', 'left');
-  panel(UW - 500, 16, 400, 64, 26); txt('LANDS ' + (landsOwned() + G.cap.filter(Boolean).length) + ' / ' + (WORLD.length - 1), UW - 300, 49, 30, '#ffffff');
+  const hs = toUI(G.hero.x, 6, G.hero.z), bob = Math.sin(G.t * 5) * 5; ctx.beginPath(); ctx.moveTo(hs.x, hs.y + bob); ctx.lineTo(hs.x - 16, hs.y - 26 + bob); ctx.lineTo(hs.x + 16, hs.y - 26 + bob); ctx.closePath(); ctx.fillStyle = '#ffd23f'; ctx.fill(); ctx.lineWidth = 4; ctx.strokeStyle = OUT; ctx.stroke(); txt('YOU', hs.x, hs.y - 38 + bob, 20, '#fff', 'center', 4);
+  if (G.target) { const t = toUI(G.target.x, 16, G.target.z); txt('▼', t.x, t.y + bob, 32, '#ffd23f'); }
+  panel(18, 16, 730, 62, 24);
+  txt('COINS ' + fmt(G.coins), 40, 48, 25, '#ffd23f', 'left'); txt('WOOD ' + fmt(G.wood), 240, 48, 25, '#8fd37a', 'left'); txt('STONE ' + fmt(G.stone), 390, 48, 25, '#dfe3ea', 'left'); txt('TROOPS ' + fmt(G.troops), 560, 48, 25, '#8ab4ff', 'left');
+  panel(UW - 410, 16, 310, 62, 24); txt('TAKEN ' + (landsOwned() + G.cap.filter(Boolean).length) + ' OF ' + CASTLES.length, UW - 255, 48, 28, '#ffffff');
   hudBtn(B.close.x, B.close.y, B.close.r, () => { txt('✕', 0, 2, 34, OUT, 'center', 0); });
-  // bottom bar
-  const canTrain = G.wood >= TRAIN.wood && G.stone >= TRAIN.stone;
-  bigBtn(B.train, canTrain ? '#5a9cff' : '#6b7890', canTrain ? '#2f5fc8' : '#3f4a60', 'TRAIN +' + TRAIN.n, 32, TRAIN.wood + ' wood, ' + TRAIN.stone + ' stone');
-  const sel = M.sel && WN[M.sel], cx = (340 + UW - 360) / 2, cw = UW - 360 - 340;
-  panel(340, UH - 138, cw, 122, 22);
-  if (sel) {
-    const own = nodeOwned(sel), R = REALMS[sel.r], lv = G.world[sel.id] || 0, reach = canReach(sel); let l1 = '', l2 = '';
-    if (sel.id === 'home') { l1 = 'Your home.'; l2 = 'Build it up by walking around it.'; }
-    else if (sel.fort !== undefined) {
-      if (own) { l1 = 'Yours. Walk there on the big map.'; l2 = 'Build barracks, mines, and more around it.'; }
-      else if (raidFort() === FORTS[sel.fort]) { l1 = 'You lead this fight yourself!'; l2 = 'Take it to free the road and open a town.'; }
-      else { l1 = 'Not ready yet.'; l2 = 'Opens at wave ' + Math.max(FORTS[sel.fort].unlock, G.raidAfter) + (raidFort() ? ', or take the open castle first.' : '.'); }
-    } else {
-      const payW = { wood: 'wood', coins: 'coins', stone: 'stone', troops: 'troops' }[R.pay];
-      l2 = 'Pays ' + payW + ' every wave' + (sel.cap ? ' (3x), and your army hits 10% harder.' : '.');
-      if (own) l1 = 'Level ' + lv + ' of 3. Build up to earn more.'; else if (reach) l1 = 'Enemy ' + landDef(sel) + ' vs your ' + G.troops + ' troops. Dice decide!'; else { l1 = 'Too far. Take a land next to it first.'; }
-    }
-    txt(sel.name + ' · ' + R.name, cx, UH - 112, 26, '#ffd23f'); txt(l1, cx, UH - 77, 23, '#fff', 'center', 4); txt(l2, cx, UH - 45, 21, '#e8d5b5', 'center', 4);
-    if (sel.fort !== undefined && !own && raidFort() === FORTS[sel.fort]) bigBtn(B.act, '#8a6cff', '#4f35b8', 'LEAD ATTACK', 32);
-    else if (reach && sel.def) bigBtn(B.act, '#ff7a45', '#d6402a', 'ATTACK', 38, 'send all ' + G.troops + ' troops');
-    else if (own && sel.def && lv < 3) { const c = buildCost(sel); bigBtn(B.act, '#58c26a', '#2f8f43', 'BUILD UP', 32, c + ' wood, ' + c + ' stone'); }
-  } else { const g = GOALS[G.goalI]; txt('Tap a land. Red ones you can attack.', cx, UH - 96, 26, '#fff'); if (g) txt('GOAL: ' + g.t, cx, UH - 54, 24, '#ffd23f'); else txt('You rule the whole world!', cx, UH - 54, 24, '#ffd23f'); }
-  if (M.battle) {
-    const b = M.battle, n = WN[b.id], px = UW / 2, py = UH * 0.42;
-    ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(0, 0, UW, UH); panel(px - 370, py - 170, 740, 340, 28);
-    txt('BATTLE FOR ' + n.name.toUpperCase(), px, py - 130, 36, '#ffd23f');
-    txt('YOU ' + G.troops, px - 190, py - 76, 40, '#8ab4ff'); txt('ENEMY ' + Math.max(0, b.def), px + 190, py - 76, 40, '#ff8a7a');
-    b.a.forEach((v, i) => drawDie(px - 270 + i * 80, py + 6, v, '#2f6fe0')); b.d.forEach((v, i) => drawDie(px + 150 + i * 80, py + 6, v, '#d93a2b'));
-    if (b.msg) txt(b.msg, px, py + 100, 28, b.won ? '#7ee081' : '#ff8a7a');
-    if (!b.end) bigBtn(B.act, '#6b7890', '#3f4a60', 'PULL BACK', 34);
+  const cw = UW - 400, cx = 30 + cw / 2, sel = M.sel; panel(30, UH - 138, cw, 122, 22);
+  if (sel === KEEP) { txt('YOUR KEEP', cx, UH - 112, 26, '#ffd23f'); txt('Waves come while you are in Home Vale.', cx, UH - 74, 23, '#fff', 'center', 4); bigBtn(B.act, '#58c26a', '#2f8f43', 'GO HOME', 34); }
+  else if (sel) {
+    const own = isOurs(sel), R = REALMS[sel.r], pay = R.pay; txt(sel.name + '  ·  ' + R.name, cx, UH - 112, 26, '#ffd23f');
+    if (own) { txt('Yours. Build up its town when you are there.', cx, UH - 77, 23, '#fff', 'center', 4); bigBtn(B.act, '#58c26a', '#2f8f43', 'GO THERE', 34); }
+    else { const [dw, dc] = dangerOf(sel); txt('Danger: ' + dw + '. Walk up to it and the fight starts.', cx, UH - 77, 23, dc, 'center', 4); bigBtn(B.act, '#8a6cff', '#4f35b8', 'SHOW THE WAY', 28, 'an arrow will guide you'); }
+    txt(pay ? 'Pays ' + pay + ' every wave, and opens a town.' : 'Closes this road and opens a town.', cx, UH - 45, 21, '#e8d5b5', 'center', 4);
+  } else { const g = GOALS[G.goalI]; txt('Tap a castle. Clouds hide what you have not seen yet.', cx, UH - 96, 26, '#fff'); txt(g ? 'GOAL: ' + g.t : 'You rule the whole world!', cx, UH - 54, 24, '#ffd23f'); }
+  ctx.globalAlpha = 1;
+}
+// small round map in the corner: every station near you, even ones behind buildings
+const RAD = () => ({ x: 118, y: UH - 118, r: 100 });
+function drawRadar() {
+  const Rd = RAD(), h = G.hero, span = 95, k = Rd.r / span;
+  ctx.save(); ell(ctx, Rd.x, Rd.y, Rd.r, Rd.r); ctx.clip();
+  ctx.drawImage(MINI, (h.x - span - MX0) * MK, (h.z - span - MZ0) * MK, span * 2 * MK, span * 2 * MK, Rd.x - Rd.r, Rd.y - Rd.r, Rd.r * 2, Rd.r * 2);
+  const P = (x, z) => [Rd.x + (x - h.x) * k, Rd.y + (z - h.z) * k];
+  for (const p of G.pads) { if (!p.shown || p.lvl >= TYPES[p.type].max) continue; const sp = padSpot(p), [x, y] = P(sp.x, sp.z), can = G.coins + p.paid >= padCost(p); ell(ctx, x, y, can ? 6 : 3.5, can ? 6 : 3.5); ctx.fillStyle = can ? '#7dff8e' : '#ffffff'; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = OUT; ctx.stroke(); }
+  for (const c of NODES) { const [x, y] = P(c.x, c.z); rr(ctx, x - 3, y - 3, 6, 6, 1); ctx.fillStyle = c.k === 'wood' ? '#2f8a4a' : '#8f887c'; ctx.fill(); }
+  for (const c of CASTLES) { if (!isSeen(c.x, c.z)) continue; const [x, y] = P(c.x, c.z); ell(ctx, x, y, 8, 8); ctx.fillStyle = isOurs(c) ? '#2f6fe0' : '#d93a2b'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = OUT; ctx.stroke(); }
+  { const [x, y] = P(KEEP.x, KEEP.z); ell(ctx, x, y, 8, 8); ctx.fillStyle = '#2f6fe0'; ctx.fill(); ctx.stroke(); }
+  ctx.restore();
+  ell(ctx, Rd.x, Rd.y, Rd.r, Rd.r); ctx.lineWidth = 6; ctx.strokeStyle = OUT; ctx.stroke(); ctx.lineWidth = 2.5; ctx.strokeStyle = '#f2e2c4'; ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(Rd.x, Rd.y - 8); ctx.lineTo(Rd.x - 6, Rd.y + 6); ctx.lineTo(Rd.x + 6, Rd.y + 6); ctx.closePath(); ctx.fillStyle = '#ffd23f'; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = OUT; ctx.stroke();
+}
+// a station a building hides still gets a little sign you can read
+function drawHiddenPads() {
+  const tall = [{ x: KEEP.x, z: KEEP.z, r: 9, h: 14 }]; for (const p of G.pads) if (p.lvl && p.type !== 'keep' && p.mesh) tall.push({ x: p.x, z: p.z, r: 3.2, h: 8 });
+  for (const c of CASTLES) tall.push({ x: c.x, z: c.z, r: 6 * c.sz, h: 13 * c.sz });
+  for (const p of G.pads) {
+    if (!p.shown || p.appear < 1 || p.lvl >= TYPES[p.type].max || G.hero.padId === p.id) continue; const sp = padSpot(p), s = toUI(sp.x, 0, sp.z); if (!s.ok || s.x < 0 || s.x > UW || s.y < 0 || s.y > UH) continue;
+    if (!tall.some(b => Math.abs(sp.x - b.x) < b.r && sp.z < b.z && b.z - sp.z < b.r + b.h * 0.5)) continue;
+    const t = TYPES[p.type].name + ' ' + fmt(Math.max(0, padCost(p) - p.paid)), can = G.coins + p.paid >= padCost(p); ctx.font = '20px ' + FONT; const w = ctx.measureText(t).width + 26;
+    rr(ctx, s.x - w / 2, s.y - 17, w, 34, 12); ctx.fillStyle = can ? 'rgba(40,120,60,0.95)' : 'rgba(30,50,35,0.92)'; ctx.fill(); ctx.lineWidth = 2.5; ctx.strokeStyle = '#ffffff'; ctx.stroke(); txt(t, s.x, s.y + 1, 20, '#fff', 'center', 3);
   }
+}
+function drawCompass() {
+  const h = G.hero, g = GOALS[G.goalI], t = G.target || (g && g.at && g.at()); if (!t || h.dead > 0 || G.raid) return; const d = dist(h.x, h.z, t.x, t.z); if (d < 16) return;
+  const s = toUI(h.x, 1, h.z), a = Math.atan2((t.z - h.z) * 0.9, t.x - h.x), r = 118 + Math.sin(G.t * 5) * 7;
+  ctx.save(); ctx.translate(s.x + Math.cos(a) * r, s.y + Math.sin(a) * r * 0.85); ctx.rotate(a); ctx.beginPath(); ctx.moveTo(30, 0); ctx.lineTo(-12, -22); ctx.lineTo(-4, 0); ctx.lineTo(-12, 22); ctx.closePath(); ctx.fillStyle = G.target ? '#c9b6ff' : '#ffd23f'; ctx.fill(); ctx.lineWidth = 4; ctx.strokeStyle = OUT; ctx.stroke(); ctx.restore();
 }
 // goals: always one thing to go do next
 const maxedCount = () => G.pads.filter(p => p.lvl >= TYPES[p.type].max).length;
-const townPads = () => G.pads.filter(p => p.fort !== undefined && p.lvl).length;
+const townPads = () => G.pads.filter(p => (p.fort !== undefined || p.land) && p.lvl).length;
 const capOf = id => G.world[id] > 0;
+const padAt = id => () => padSpot(G.padMap[id]);
+const castleAt = id => () => CASTLES.find(c => c.id === id);
+const nearestFoe = (list = CASTLES) => () => { const h = G.hero; return list.filter(c => !isOurs(c)).sort((a, b) => dist(a.x, a.z, h.x, h.z) - dist(b.x, b.z, h.x, h.z))[0]; };
+const nearestNode = k => () => { const h = G.hero; return NODES.filter(n => n.k === k).sort((a, b) => dist(a.x, a.z, h.x, h.z) - dist(b.x, b.z, h.x, h.z))[0]; };
+const firstTown = () => { const p = G.pads.find(p => (p.fort !== undefined || p.land) && p.shown && !p.lvl); return p ? padSpot(p) : null; };
 const GOALS = [
-  { t: 'Build your first tower', f: () => G.lv('t1') > 0, r: { coins: 20 } },
+  { t: 'Build your first tower', f: () => G.lv('t1') > 0, r: { coins: 20 }, at: padAt('t1') },
   { t: 'Clear wave 3', f: () => G.cleared >= 3, r: { coins: 40 } },
-  { t: 'Stop by trees and gather 10 wood', f: () => G.wood >= 10, r: { stone: 10 } },
-  { t: 'Build the WORKERS camp', f: () => G.lv('camp') > 0, r: { wood: 15 } },
-  { t: 'Build the BANK', f: () => G.lv('bank') > 0, r: { coins: 60 } },
-  { t: 'Build the MARKET', f: () => G.lv('market') > 0, r: { coins: 100 } },
-  { t: 'Invest 200 coins at the market', f: () => G.invest >= 200, r: { crowns: 2 } },
+  { t: 'Stop by trees and gather 10 wood', f: () => G.wood >= 10, r: { stone: 10 }, at: nearestNode('wood') },
+  { t: 'Build the WORKERS camp', f: () => G.lv('camp') > 0, r: { wood: 15 }, at: padAt('camp') },
+  { t: 'Build the BANK', f: () => G.lv('bank') > 0, r: { coins: 60 }, at: padAt('bank') },
+  { t: 'Build the MARKET', f: () => G.lv('market') > 0, r: { coins: 100 }, at: padAt('market') },
+  { t: 'Invest 200 coins at the market', f: () => G.invest >= 200, r: { crowns: 2 }, at: () => INV_IN },
   { t: 'Open the world MAP', f: () => G.seenMap, r: { wood: 20, stone: 20 } },
-  { t: 'Train up to 10 troops', f: () => G.troops >= 10, r: { crowns: 2 } },
+  { t: 'Train up to 10 troops', f: () => G.troops >= 10, r: { crowns: 2 }, at: () => TRAIN_Z },
   { t: 'Clear wave 10', f: () => G.cleared >= 10, r: { coins: 300 } },
-  { t: 'Have 3 workers', f: () => G.lv('camp') >= 3, r: { wood: 40, stone: 40 } },
-  { t: 'Capture a castle', f: () => G.cap.some(Boolean), r: { crowns: 3 } },
-  { t: 'Build in your new castle town', f: () => townPads() >= 1, r: { troops: 10 } },
-  { t: 'Conquer your first land on the MAP', f: () => landsOwned() >= 1, r: { crowns: 3 } },
+  { t: 'Have 3 workers', f: () => G.lv('camp') >= 3, r: { wood: 40, stone: 40 }, at: padAt('camp') },
+  { t: 'Capture a castle', f: () => G.cap.some(Boolean), r: { crowns: 3 }, at: nearestFoe(FORTS) },
+  { t: 'Build in your new castle town', f: () => townPads() >= 1, r: { troops: 10 }, at: firstTown },
+  { t: 'Take a castle in the wild', f: () => landsOwned() >= 1, r: { crowns: 3 }, at: nearestFoe(LANDS) },
   { t: 'Max out one building', f: () => maxedCount() >= 1, r: { crowns: 3 } },
   { t: 'Clear wave 20', f: () => G.cleared >= 20, r: { coins: 1000 } },
-  { t: 'Build 5 things in castle towns', f: () => townPads() >= 5, r: { troops: 25 } },
-  { t: 'Capture all 4 castles', f: () => G.cap.every(Boolean), r: { crowns: 8 } },
-  { t: 'Take the Forest Capital', f: () => capOf('fc'), r: { crowns: 5 } },
+  { t: 'Build 5 things in castle towns', f: () => townPads() >= 5, r: { troops: 25 }, at: firstTown },
+  { t: 'Capture all 4 home castles', f: () => G.cap.every(Boolean), r: { crowns: 8 }, at: nearestFoe(FORTS) },
+  { t: 'Take the Forest Capital', f: () => capOf('fc'), r: { crowns: 5 }, at: castleAt('fc') },
   { t: 'Max out 5 buildings', f: () => maxedCount() >= 5, r: { crowns: 6 } },
-  { t: 'Conquer 8 lands', f: () => landsOwned() >= 8, r: { troops: 50 } },
-  { t: 'Take the Desert Capital', f: () => capOf('dc'), r: { crowns: 8 } },
+  { t: 'Take 8 castles in the wild', f: () => landsOwned() >= 8, r: { troops: 50 }, at: nearestFoe(LANDS) },
+  { t: 'Take the Desert Capital', f: () => capOf('dc'), r: { crowns: 8 }, at: castleAt('dc') },
   { t: 'Clear wave 30', f: () => G.cleared >= 30, r: { coins: 5000 } },
-  { t: 'Take the Frost Capital', f: () => capOf('ic'), r: { crowns: 10 } },
+  { t: 'Take the Frost Capital', f: () => capOf('ic'), r: { crowns: 10 }, at: castleAt('ic') },
   { t: 'Max out 12 buildings', f: () => maxedCount() >= 12, r: { crowns: 12 } },
   { t: 'Clear wave 40', f: () => G.cleared >= 40, r: { coins: 20000 } },
-  { t: "Beat the Emperor's Throne", f: () => capOf('xc'), r: { crowns: 50 } },
+  { t: 'Find 12 treasure chests', f: () => G.chests.length >= 12, r: { crowns: 15 } },
+  { t: "Beat the Emperor's Throne", f: () => capOf('xc'), r: { crowns: 50 }, at: castleAt('xc') },
 ];
 const rewardText = r => Object.keys(r).map(k => '+' + fmt(r[k]) + ' ' + k).join(' ');
 function checkGoals() {
@@ -1328,19 +1407,17 @@ function checkGoals() {
   const r = g.r; G.goalI++;
   if (r.coins) dropCoins(G.hero.x, G.hero.z, r.coins); if (r.wood) G.wood += r.wood; if (r.stone) G.stone += r.stone; if (r.troops) G.troops += r.troops; if (r.crowns) META.crowns += r.crowns;
   toast('GOAL DONE! ' + rewardText(r), '#ffd23f'); AU.play('clear'); saveMeta();
-  if (!GOALS[G.goalI]) banner('YOU RULE THE WORLD!', 'Every land is yours', '#ffd23f', 4);
+  if (!GOALS[G.goalI]) banner('YOU RULE THE WORLD!', 'The Emperor is beaten', '#ffd23f', 4);
 }
-// bot: spend on troops, then attack whatever it can beat
-function botWorld() {
-  while (trainTroops());
-  for (const n of WORLD) if (n.def && canReach(n) && G.troops > landDef(n) * 1.3) { G.map = { sel: n.id, battle: null }; startBattle(n); while (G.map.battle && !G.map.battle.end) { G.map.battle.t = 0; mapTick(0); } if (G.map.battle && G.map.battle.won) BOTLOG.push('LAND ' + n.id + ' w' + G.cleared); G.map = null; }
-}
+// bot: spends wood and stone on troops, and walks out to castles it can beat
+function botWorld() { while (trainTroops()); }
+const botCastle = () => { const h = G.hero; if (G.waveState !== 'prep' || h.hp < h.maxHp * 0.5) return null; return CASTLES.filter(c => !isOurs(c) && c.pw <= G.cleared + 1).sort((a, b) => dist(a.x, a.z, h.x, h.z) - dist(b.x, b.z, h.x, h.z))[0]; };
 
 // bot for ?auto / ?sim: buy the cheapest thing, otherwise fight at the front and grab coins
 const BOTLOG = [];
 function aiMove(dt) {
   const h = G.hero; G.aiT -= dt;
-  if (G.raid) { const e = nearestIn(h.x, h.z, 200); if (!e) return { x: 0, z: 0 }; const dx = e.x - h.x, dz = e.z - h.z, d = Math.hypot(dx, dz) || 1; return d < 1 ? { x: 0, z: 0 } : { x: dx / d, z: dz / d }; }
+  if (G.raid && G.raid.f.pw <= G.cleared + 2 && G.waveState === 'prep') { const e = nearestIn(h.x, h.z, 60) || G.raid.e; if (!e) return { x: 0, z: 0 }; const dx = e.x - h.x, dz = e.z - h.z, d = Math.hypot(dx, dz) || 1; return d < 1 ? { x: 0, z: 0 } : { x: dx / d, z: dz / d }; }
   if (G.aiT <= 0 || !G.aiGoal) {
     G.aiT = 0.35;
     const keep = G.padMap.keep; let goal = null, bc = 1e18;
@@ -1352,11 +1429,13 @@ function aiMove(dt) {
     if (goal && G.coins >= bc) { const s = padSpot(goal); G.aiGoal = { x: s.x, z: s.z }; }
     else {
       let c = null, cd = 1e9; for (const k of G.loot) { if (k.st !== 1) continue; const d = dist(k.x, k.z, h.x, h.z); if (d < cd) { cd = d; c = k; } }
-      const front = firstIn(KEEP.x, KEEP.z, 60);
+      const front = firstIn(KEEP.x, KEEP.z, 140);
+      const bc2 = botCastle();
       if (c && cd < 12) G.aiGoal = { x: c.x, z: c.z };
+      else if (bc2) G.aiGoal = { x: bc2.x, z: bc2.z };
       else if (front && h.hp > h.maxHp * 0.35) G.aiGoal = { x: front.x - Math.cos(pathPos(front.p, front.s).ang) * 1.6, z: front.z - Math.sin(pathPos(front.p, front.s).ang) * 1.6 };
       else if (c) G.aiGoal = { x: c.x, z: c.z };
-      else G.aiGoal = { x: 24, z: 24 };
+      else G.aiGoal = { x: wx(24), z: wz(24) };
     }
   }
   const dx = G.aiGoal.x - h.x, dz = G.aiGoal.z - h.z, d = Math.hypot(dx, dz);
@@ -1382,15 +1461,21 @@ function syncScene(rdt) {
   const h = G.hero;
   // camera follows hero (title: slow orbit around the keep)
   if (G.state === 'title') {
-    const a = G.t * 0.12; camera.position.set(KEEP.x + 14 + Math.cos(a) * 26, 24, KEEP.z + Math.sin(a) * 26); camera.lookAt(KEEP.x + 14, 0, KEEP.z);
+    const a = G.t * 0.12; if (camera.near !== 4 || camera.far !== 420) { camera.near = 4; camera.far = 420; camera.updateProjectionMatrix(); } scene.fog.near = 100; scene.fog.far = 210; camera.position.set(KEEP.x + 14 + Math.cos(a) * 34, 32, KEEP.z + Math.sin(a) * 34); camera.lookAt(KEEP.x + 14, 0, KEEP.z);
   } else {
-    const tx = clamp(h.x, 19, MAPW - 17), tz = clamp(h.z, 11, MAPH - 13);
+    const tx = clamp(h.x, 25, MAPW - 25), tz = clamp(h.z, 15, MAPH - 15);
     G.cam.x = lerp(G.cam.x, tx, Math.min(1, rdt * 4)); G.cam.z = lerp(G.cam.z, tz, Math.min(1, rdt * 4));
-    const sh = G.shake > 0.02 ? G.shake : 0;
-    camera.position.set(G.cam.x + rnd(-sh, sh) * 0.4, 33 + rnd(-sh, sh) * 0.4, G.cam.z + 22.5);
-    camera.lookAt(G.cam.x, 0, G.cam.z + 0.5);
+    const sh = G.shake > 0.02 ? G.shake : 0, f = G.map ? easeInOut(G.map.k) : 0, V = mapView();
+    // high, steep camera so buildings hide less; MAP lifts it up over the whole world
+    camera.position.set(lerp(G.cam.x, MAPW / 2, f) + rnd(-sh, sh) * 0.4, lerp(54, V.y, f) + rnd(-sh, sh) * 0.4, lerp(G.cam.z + 24, MAPH / 2 + V.z, f));
+    camera.lookAt(lerp(G.cam.x, MAPW / 2, f), 0, lerp(G.cam.z + 1.5, MAPH / 2, f));
+    const fnear = f > 0.2 ? 60 : 4, ffar = f > 0.01 ? 3200 : 420; if (camera.near !== fnear || camera.far !== ffar) { camera.near = fnear; camera.far = ffar; camera.updateProjectionMatrix(); }
+    scene.fog.near = lerp(100, 2600, f); scene.fog.far = lerp(210, 3200, f);
   }
-  sun.position.set(camera.position.x - 18, 40, camera.position.z - 30); sun.target.position.set(camera.position.x, 0, camera.position.z - 18);
+  const wide = G.state !== 'title' && G.map && G.map.k > 0.5, sc = sun.shadow.camera;
+  if (wide !== !!G.sunWide) { G.sunWide = wide; const w = wide ? 400 : 62, hh = wide ? 300 : 52; sc.left = -w; sc.right = w; sc.top = hh; sc.bottom = -hh; sc.far = wide ? 900 : 220; sc.updateProjectionMatrix(); }
+  if (wide) { sun.position.set(MAPW / 2 - 110, 300, MAPH / 2 - 160); sun.target.position.set(MAPW / 2, 0, MAPH / 2); }
+  else { const cx = G.state === 'title' ? KEEP.x + 14 : G.cam.x, cz = G.state === 'title' ? KEEP.z : G.cam.z; sun.position.set(cx - 30, 85, cz - 40); sun.target.position.set(cx, 0, cz); }
   // hero
   const hs = heroStats(), H = hero3;
   H.g.visible = true; H.g.position.set(h.x, 0, h.z);
@@ -1433,7 +1518,8 @@ function syncScene(rdt) {
     }
     // pad decal
     const show = p.shown && p.lvl < TYPES[p.type].max && !(p.type === 'wall' && p.broken) && G.state !== 'title';
-    p.padMesh.visible = show && p.appear > 0;
+    if (show && !p.padMesh) makePad(p);
+    if (p.padMesh) p.padMesh.visible = show && p.appear > 0;
     if (show) {
       const s = padSpot(p), cost = padCost(p), can = G.coins + p.paid >= cost, on = G.hero.padId === p.id;
       p.padMesh.position.set(s.x, 0.07 + (on ? 0.02 : 0), s.z);
@@ -1446,6 +1532,7 @@ function syncScene(rdt) {
   for (const z of bankZones) { z.m.visible = bankOn; if (bankOn) drawZone(z, G.bank, 'of ' + fmt(towerStats(G.padMap.bank).cap)); }
   const invOn = G.lv('market') > 0 && G.state !== 'title';
   for (const z of investZones) { z.m.visible = invOn; if (invOn) drawZone(z, G.invest, '+' + towerStats(G.padMap.market).rate + '% a wave'); }
+  trainZone.m.visible = !!G.bkTop && G.state !== 'title'; if (trainZone.m.visible) drawZone(trainZone, G.troops, TRAIN.wood + ' wood ' + TRAIN.stone + ' stone');
   // range ring for the tower you're standing on
   const rp = G.rangeOf; rangeRing.visible = !!(rp && towerStats(rp).range);
   if (rangeRing.visible) { const r = towerStats(rp).range; rangeRing.position.set(rp.x, 0.09, rp.z); rangeRing.scale.setScalar(r); }
@@ -1537,7 +1624,7 @@ function padInfo(p) {
     case 'cannon': return ['Slow, big blast that hits a whole group.', up('Damage', sa.dmg, sb.dmg)];
     case 'ballista': return ['Long shot that goes through a whole line.', up('Damage', sa.dmg, sb.dmg)];
     case 'mine': return ['Pays you extra coins after every wave.', up('Pay', sa.pay, sb.pay)];
-    case 'barracks': return ['Soldiers fight and come on attacks. Also trains troops for the MAP.', up('Soldiers', sa.n, sb.n)];
+    case 'barracks': return ['Soldiers fight for you and walk with you when you explore.', up('Soldiers', sa.n, sb.n)];
     case 'mage': return ['Lightning that jumps from enemy to enemy.', up('Damage', sa.dmg, sb.dmg)];
     case 'bank': return ['Safe when you lose, but it only grows ' + sb.rate + '% a wave.', up('Holds', sa.cap, sb.cap)];
     case 'market': return ['Invest coins. They grow on their growth, with no limit. Lose a fight: -25%.', up('Growth a wave %', sa.rate, sb.rate)];
@@ -1564,8 +1651,10 @@ function drawUI() {
   if (h.dead <= 0 && h.hp < h.maxHp) { const s = toUI(h.x, 3.0, h.z); if (s.ok) bar(s.x - 36, s.y, 72, 11, h.hp / h.maxHp, h.hp / h.maxHp < 0.3 ? '#ff4d3d' : '#62e07e'); }
   for (const n of G.nums) { const s = toUI(n.x, n.y, n.z); if (!s.ok) continue; ctx.globalAlpha = Math.min(1, n.life * 3); txt(n.v, s.x, s.y, n.size * (n.life > 0.6 ? 1 + (n.life - 0.6) * 2 : 1), n.c); }
   ctx.globalAlpha = 1;
-  for (const n of NODES) { if (dist(n.x, n.z, h.x, h.z) > 26) continue; const s = toUI(n.x, 6, n.z); if (s.ok) txt(n.k === 'wood' ? 'WOOD' : 'STONE', s.x, s.y, 22, n.k === 'wood' ? '#8fd37a' : '#dfe3ea'); }
-  FORTS.forEach((f, i) => { if (G.raid && G.raid.f === f) return; const s = toUI(f.x, 13, f.z); if (!s.ok) return; if (G.cap[i]) txt('YOURS', s.x, s.y, 26, '#7ee081'); else if (raidFort() === f) txt('ATTACK ME', s.x, s.y, 26, '#ff8a7a'); else txt('ENEMY CASTLE · WAVE ' + Math.max(f.unlock, G.raidAfter), s.x, s.y, 22, '#ffd9cf'); });
+  for (const n of NODES) { if (dist(n.x, n.z, h.x, h.z) > 50) continue; const s = toUI(n.x, 7, n.z); if (s.ok) txt(n.k === 'wood' ? 'WOOD' : 'STONE', s.x, s.y, 22, n.k === 'wood' ? '#8fd37a' : '#dfe3ea'); }
+  for (const f of CASTLES) { if (G.raid && G.raid.f === f) continue; if (Math.abs(f.x - h.x) > 70 || Math.abs(f.z - h.z) > 60) continue; const s = toUI(f.x, 14 * f.sz, f.z); if (!s.ok) continue; if (isOurs(f)) txt(f.name + ' · YOURS', s.x, s.y, 22, '#7ee081'); else { const [dw, dc] = dangerOf(f); txt(f.name, s.x, s.y - 14, 24, '#ffd9cf'); txt(dw, s.x, s.y + 12, 22, dc); } }
+  drawHiddenPads();
+  if (G.state === 'play') drawCompass();
   // off-screen pads you can afford
   const cheap = G.pads.filter(p => p.shown && p.lvl < TYPES[p.type].max && G.coins + p.paid >= padCost(p)).sort((a, b) => padCost(a) - padCost(b)).slice(0, 2);
   for (const p of cheap) {
@@ -1593,7 +1682,8 @@ function drawUI() {
   txt(G.raid ? 'ATTACK!' : G.wave ? 'WAVE ' + G.wave : 'GET READY', wx, 40, 34, G.raid ? '#ff8a7a' : '#ffffff');
   if (G.waveState === 'fight') bar(wx - 140, 62, 280, 18, G.waveTotal ? G.waveDone / G.waveTotal : 0, '#ffb13d'); else bar(wx - 140, 62, 280, 18, 1, '#7ee081');
   const B = HUDB();
-  { const on = G.waveState === 'prep' && !G.raid; rr(ctx, B.map.x - 55, B.map.y - 30, 110, 60, 22); ctx.fillStyle = on ? '#58c26a' : '#6b7890'; ctx.fill(); ctx.lineWidth = 3.5; ctx.strokeStyle = OUT; ctx.stroke(); txt('MAP', B.map.x, B.map.y + 2, 28, '#fff'); }
+  drawRadar();
+  { rr(ctx, B.map.x - 55, B.map.y - 30, 110, 60, 22); ctx.fillStyle = '#58c26a'; ctx.fill(); ctx.lineWidth = 3.5; ctx.strokeStyle = OUT; ctx.stroke(); txt('MAP', B.map.x, B.map.y + 2, 28, '#fff'); }
   { const g = GOALS[G.goalI]; if (g) { const gx = UW - 410; panel(gx, 88, 392, 66, 18); txt('GOAL: ' + g.t, gx + 196, 109, g.t.length > 26 ? 18 : 22, '#ffd23f', 'center', 4); txt('Reward: ' + rewardText(g.r), gx + 196, 135, 18, '#ffffff', 'center', 3); } }
   hudBtn(B.pause.x, B.pause.y, B.pause.r, () => { ctx.fillStyle = OUT; rr(ctx, -10, -12, 7, 24, 2); ctx.fill(); rr(ctx, 3, -12, 7, 24, 2); ctx.fill(); });
   hudBtn(B.sound.x, B.sound.y, B.sound.r, () => { ctx.fillStyle = OUT; ctx.beginPath(); ctx.moveTo(-12, -5); ctx.lineTo(-5, -5); ctx.lineTo(3, -13); ctx.lineTo(3, 13); ctx.lineTo(-5, 5); ctx.lineTo(-12, 5); ctx.closePath(); ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = OUT; ctx.beginPath(); if (AU.muted) { ctx.moveTo(7, -7); ctx.lineTo(15, 7); ctx.moveTo(15, -7); ctx.lineTo(7, 7); } else ctx.arc(4, 0, 9, -0.8, 0.8); ctx.stroke(); }, !AU.muted);
@@ -1602,12 +1692,12 @@ function drawUI() {
     const c = G.preview.counts, parts = Object.keys(c).filter(k => k !== 'imp').map(k => (k === 'boss' ? '⚠ ' : c[k] + ' ') + ENAMES[k]);
     panel(wx - 300, 104, 600, 50, 18); txt('NEXT: ' + parts.join('  ·  '), wx, 129, 24, '#ffd9cf');
     bigBtn(B.go, '#ff7a45', '#d6402a', 'FIGHT! (' + Math.ceil(G.next) + ')', 36);
-    if (raidFort()) bigBtn(B.raid, '#8a6cff', '#4f35b8', 'ATTACK CASTLE', 28, 'wave stops while you attack');
+    if (G.away) { panel(wx - 300, 160, 600, 46, 16); txt('Exploring: waves wait until you go home', wx, 183, 24, '#ffffff'); }
   }
-  if (G.raid && G.raid.endT === null && G.state === 'play') bigBtn(B.go, '#6b7890', '#3f4a60', 'RETREAT', 34);
+  if (G.raid && G.raid.endT === null && G.state === 'play') bigBtn(B.go, '#6b7890', '#3f4a60', 'RUN HOME', 34);
   if (G.state === 'play' && !G.raid && G.hero.padId && G.padMap[G.hero.padId]) {
     const p = G.padMap[G.hero.padId], [l1, l2] = padInfo(p);
-    panel(wx - 400, 164, 800, 74, 18); txt(TYPES[p.type].name + ' — ' + l1, wx, 188, 23, TYPES[p.type].col, 'center', 4); txt(l2 + (G.hero.moving ? '   ·   STOP HERE TO BUY' : ''), wx, 217, 22, '#ffffff', 'center', 4);
+    panel(wx - 400, 212, 800, 74, 18); txt(TYPES[p.type].name + ' — ' + l1, wx, 236, 23, TYPES[p.type].col, 'center', 4); txt(l2 + (G.hero.moving ? '   ·   STOP HERE TO BUY' : ''), wx, 265, 22, '#ffffff', 'center', 4);
   }
   if (G.bossRef && G.bossRef.alive) { txt(G.bossRef.stat ? G.raid.f.name : 'WARLORD', wx, 114, 22, '#ff8a7a'); bar(wx - 220, 128, 440, 22, G.bossRef.hp / G.bossRef.max, '#ff4d3d'); }
   G.toasts.forEach((t, i) => { const a = Math.min(1, t.life * 2), y = UH - 160 - (G.toasts.length - 1 - i) * 52; ctx.globalAlpha = a; rr(ctx, wx - 240, y - 24, 480, 46, 23); ctx.fillStyle = 'rgba(30,20,12,0.85)'; ctx.fill(); txt(t.text, wx, y, 28, t.c); ctx.globalAlpha = 1; });
@@ -1658,7 +1748,7 @@ function drawTitle() {
   ctx.save(); ctx.translate(cx, UH * 0.28 + bob); ctx.rotate(-0.03);
   ctx.font = '150px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineJoin = 'round'; ctx.lineWidth = 26; ctx.strokeStyle = OUT; ctx.strokeText('EMBER KEEP', 0, 0);
   const gr = ctx.createLinearGradient(0, -60, 0, 60); gr.addColorStop(0, '#ffe58a'); gr.addColorStop(0.5, '#ffb13d'); gr.addColorStop(1, '#e8541e'); ctx.fillStyle = gr; ctx.fillText('EMBER KEEP', 0, 0); ctx.restore();
-  txt('Grab coins. Build on the pads. Hold the keep!', cx, UH * 0.28 + 110, 36, '#ffffff');
+  txt('Build your keep. Walk the world. Take every castle!', cx, UH * 0.28 + 110, 36, '#ffffff');
   const p = 1 + Math.sin(G.t * 5) * 0.06;
   ctx.save(); ctx.translate(cx, UH * 0.62); ctx.scale(p, p);
   rr(ctx, -190, -48, 380, 96, 30); const g2 = ctx.createLinearGradient(0, -48, 0, 48); g2.addColorStop(0, '#6fe07e'); g2.addColorStop(1, '#25a046'); ctx.fillStyle = g2; ctx.fill(); ctx.lineWidth = 6; ctx.strokeStyle = OUT; ctx.stroke();
@@ -1712,11 +1802,10 @@ uic.addEventListener('pointerdown', ev => {
   const B = HUDB();
   if (dist(p.x, p.y, B.pause.x, B.pause.y) < B.pause.r + 10) { G.paused = true; AU.play('tap'); return; }
   if (dist(p.x, p.y, B.sound.x, B.sound.y) < B.sound.r + 10) { AU.muted = !AU.muted; AU.play('tap'); return; }
-  if (inBtn(p, B.map)) { if (G.waveState === 'prep' && !G.raid) { G.map = { sel: null, battle: null }; G.seenMap = true; AU.play('tap'); } else toast('Finish the fight first', '#ffffff'); return; }
-  if (G.raid && G.raid.endT === null && Math.abs(p.x - B.go.x) < B.go.w / 2 && Math.abs(p.y - B.go.y) < B.go.h / 2) { toast('You pulled back. No harm done.', '#ffffff'); endRaid(); AU.play('tap'); return; }
-  if (G.waveState === 'prep' && !G.raid && raidFort() && Math.abs(p.x - B.raid.x) < B.raid.w / 2 && Math.abs(p.y - B.raid.y) < B.raid.h / 2) { startRaid(raidFort()); return; }
+  const Rd = RAD(); if (inBtn(p, B.map) || dist(p.x, p.y, Rd.x, Rd.y) < Rd.r) { G.map = { k: 0, closing: false, sel: null }; G.seenMap = true; input.joy = null; joyId = null; input.dx = input.dz = 0; AU.play('tap'); return; }
+  if (G.raid && G.raid.endT === null && Math.abs(p.x - B.go.x) < B.go.w / 2 && Math.abs(p.y - B.go.y) < B.go.h / 2) { endRaid(); travelTo(KEEP); AU.play('tap'); return; }
   if (G.waveState === 'prep' && !G.raid && (G.tut >= 3 || G.wave > 0) && Math.abs(p.x - B.go.x) < B.go.w / 2 && Math.abs(p.y - B.go.y) < B.go.h / 2) {
-    const bonus = Math.round(Math.ceil(G.next) * (1 + G.wave * 0.25)); if (bonus > 0) { dropCoins(G.hero.x, G.hero.z, bonus); toast('Early fight: +' + bonus + ' coins', '#ffd23f'); }
+    const bonus = Math.round(Math.ceil(G.next) * 0.6 * (1 + G.wave * 0.25)); if (bonus > 0) { dropCoins(G.hero.x, G.hero.z, bonus); toast('Early fight: +' + bonus + ' coins', '#ffd23f'); }
     G.next = 0; AU.play('tap'); return;
   }
   // a first finger always takes the stick, in case iOS never sent the last finger's up
@@ -1750,7 +1839,7 @@ function frame(now) {
   const real = Math.min(0.05, (now - last) / 1000); last = now;
   if (!input.joy) { const kx = (keys.d || keys.arrowright ? 1 : 0) - (keys.a || keys.arrowleft ? 1 : 0), kz = (keys.s || keys.arrowdown ? 1 : 0) - (keys.w || keys.arrowup ? 1 : 0); input.dx = kx; input.dz = kz; }
   G.shake = Math.max(0, G.shake - real * 3);
-  if (G.map) { G.t += real; mapTick(real); if (!portrait) { drawUI(); return; } }
+  if (G.map) { G.t += real; const M = G.map; M.k = clamp(M.k + (M.closing ? -real : real) * 1.8, 0, 1); if (M.closing && M.k <= 0) G.map = null; if (!portrait) { M.f = (M.f || 0) + 1; const still = M.k >= 1; renderer.shadowMap.autoUpdate = !still || M.f % 60 === 1; if (!still || M.f % 6 === 1) { syncScene(real); renderer.render(scene, camera); } renderer.shadowMap.autoUpdate = true; drawUI(); return; } }
   if (G.slowT > 0) { G.slowT -= real; if (G.slowT <= 0) G.slow = 1; }
   if (G.state === 'title') G.t += real;
   else if (!G.paused && !portrait) {
@@ -1784,49 +1873,42 @@ function runSim() {
 async function selfTest() {
   const out = [], step = n => { for (let i = 0; i < n; i++) { update(1 / 30); syncScene(1 / 30); } };
   const ev = (t, x, y) => uic.dispatchEvent(new PointerEvent(t, { clientX: x, clientY: y, pointerId: 9, bubbles: true, isPrimary: true, pointerType: 'touch' }));
-  const k = S / DPR, cx = UW / 2 * k, cy = UH * 0.62 * k;
+  const k = S / DPR, cx = UW / 2 * k, cy = UH * 0.62 * k, tap = b => { ev('pointerdown', b.x * k, b.y * k); ev('pointerup', b.x * k, b.y * k); };
   ev('pointerdown', cx, cy); ev('pointerup', cx, cy);
   out.push('after play tap: state=' + G.state + ' tut=' + G.tut);
-  const walk = (tx, tz) => { ev('pointerdown', 300, 300); for (let i = 0; i < 300; i++) { const dx = tx - G.hero.x, dz = tz - G.hero.z, d = Math.hypot(dx, dz); if (d < 0.4) break; ev('pointermove', 300 + dx / d * 60, 300 + dz / d * 60); step(1); } ev('pointerup', 300, 300); };
-  walk(20.5, 21.5); step(40);
-  out.push('after coins: coins=' + G.coins + ' tut=' + G.tut + ' hero=' + G.hero.x.toFixed(1) + ',' + G.hero.z.toFixed(1));
+  const walk = (tx, tz) => { ev('pointerdown', 500, 300); for (let i = 0; i < 900; i++) { const dx = tx - G.hero.x, dz = tz - G.hero.z, d = Math.hypot(dx, dz); if (d < 0.5) break; ev('pointermove', 500 + dx / d * 60, 300 + dz / d * 60); step(1); } ev('pointerup', 500, 300); G.hero.vx = G.hero.vz = 0; };
+  walk(G.loot[0].x, G.loot[0].z); walk(G.loot[G.loot.length - 1].x, G.loot[G.loot.length - 1].z); step(40);
+  out.push('after coins: coins=' + G.coins + ' tut=' + G.tut);
   walk(G.padMap.t1.x, G.padMap.t1.z); step(60);
-  out.push('after pad: t1 lvl=' + G.padMap.t1.lvl + ' coins=' + G.coins + ' tut=' + G.tut + ' next=' + G.next.toFixed(1));
+  out.push('after pad: t1 lvl=' + G.padMap.t1.lvl + ' coins=' + G.coins + ' next=' + G.next.toFixed(1));
   step(30 * 25); out.push('25s later: wave=' + G.wave + ' enemies=' + G.enemies.length + ' kills=' + G.kills + ' keep=' + Math.round(G.padMap.keep.hp));
-  // bank: build, put in, take out
-  G.enemies = []; G.queue = []; G.waveState = 'prep'; G.next = 999; G.cleared = 5; G.coins = 400; for (const p of G.pads) if (p.unlock <= 5 && p.fort === undefined) { p.shown = true; p.appear = 1; }
-  const c0 = () => Math.round(G.coins);
-  walk(G.padMap.bank.x, G.padMap.bank.z); step(60); out.push('bank lvl=' + G.padMap.bank.lvl + ' coins=' + c0());
-  walk(BANK_DEP.x, BANK_DEP.z); step(30); out.push('put in: bank=' + Math.round(G.bank) + ' coins=' + c0());
-  const banked = Math.round(G.bank);
-  walk(BANK_WD.x, BANK_WD.z); step(20); walk(24, 30); step(40); out.push('take out: bank=' + Math.round(G.bank) + ' coins=' + c0());
-  G.bank = banked;
-  // raid: tap ATTACK, tap RETREAT, attack again and win
-  const B = HUDB(), tap = b => { ev('pointerdown', b.x * k, b.y * k); ev('pointerup', b.x * k, b.y * k); };
-  tap(B.raid); out.push('raid tap: raid=' + !!G.raid + ' hero=' + G.hero.x.toFixed(0) + ',' + G.hero.z.toFixed(0)); step(90); out.push('guards=' + G.enemies.filter(e => e.free && !e.stat).length);
-  renderer.render(scene, camera); drawUI();
-  tap(B.go); out.push('retreat: raid=' + !!G.raid + ' enemies=' + G.enemies.length);
-  tap(B.raid); G.raid.e.hp = 1; G.hero.x = G.raid.f.x - 4.2; G.hero.z = G.raid.f.z; step(40); out.push('capture: cap0=' + G.cap[0] + ' raid=' + !!G.raid); step(120); out.push('after: raid=' + !!G.raid + ' paths=' + buildWave(6).paths.length);
+  const calm = () => { G.enemies = []; G.queue = []; G.waveState = 'prep'; G.next = 999; };
+  calm(); G.cleared = 5; G.coins = 400; for (const p of G.pads) if (p.unlock <= 5 && p.fort === undefined && !p.land) { p.shown = true; p.appear = 1; }
+  walk(G.padMap.bank.x, G.padMap.bank.z); step(60); out.push('bank lvl=' + G.padMap.bank.lvl + ' coins=' + Math.round(G.coins));
+  walk(BANK_DEP.x, BANK_DEP.z); step(30); out.push('put in: bank=' + Math.round(G.bank));
+  // walking over a pad pays nothing, stopping pays
+  { const pd = G.padMap.boots, sp = padSpot(pd), hh = G.hero; calm(); G.coins = 500; pd.paid = 0; hh.x = sp.x - 4; hh.z = sp.z; hh.padId = null; for (let i = 0; i < 24; i++) { input.dx = 1; input.dz = 0; update(1 / 30); } const walked = pd.paid; input.dx = 0; hh.x = sp.x; hh.z = sp.z; hh.vx = hh.vz = 0; const l0 = pd.lvl; for (let i = 0; i < 45; i++) { input.dx = 0; update(1 / 30); } out.push('walk over pad paid=' + walked + ' stopped lvl ' + l0 + '>' + pd.lvl); }
+  // far from home the wave timer waits
+  { calm(); G.next = 10; const hh = G.hero; hh.x = KEEP.x - 160; hh.z = KEEP.z; step(60); out.push('away=' + G.away + ' timer still=' + (G.next === 10)); }
+  // chest, new realm banner
+  { const c = CHESTS[0], hh = G.hero, w0 = G.wood; hh.x = c.x; hh.z = c.z; hh.vx = hh.vz = 0; step(10); out.push('chest opened=' + G.chests.includes(0) + ' wood+' + (G.wood - w0) + ' realm=' + G.realm); }
+  // walk up to a castle: the fight starts by itself, your troops come
+  { calm(); const f = FORTS[0], hh = G.hero; G.troops = 12; G.padMap.bk.lvl = 2; rebuild(G.padMap.bk); step(2); hh.x = f.x - 40; hh.z = f.z; walk(f.x - 12, f.z); step(3); out.push('raid by walking=' + !!G.raid + ' army=' + G.soldiers.filter(s => s.army).length); hh.x = KEEP.x + 15; hh.z = KEEP.z + 15; step(3); out.push('walked off: raid=' + !!G.raid + ' army=' + G.soldiers.filter(s => s.army).length); }
+  { calm(); const f = FORTS[0], hh = G.hero; hh.x = f.x - 12; hh.z = f.z; step(2); renderer.render(scene, camera); drawUI(); G.raid.e.hp = 1; hh.x = f.x - 4.2; hh.z = f.z; step(40); out.push('capture: cap0=' + G.cap[0]); out.push('town open=' + G.padMap.e_bk.shown); step(120); out.push('after: raid=' + !!G.raid + ' paths=' + buildWave(6).paths.length); }
+  // wild castle
+  { calm(); const f = LANDS[0], hh = G.hero; hh.x = f.x; hh.z = f.z + 14; step(2); G.raid.e.hp = 1; hh.z = f.z + 4.5; step(40); out.push('wild taken=' + (G.world.f1 > 0) + ' town=' + G.padMap.l_f1_a.shown + ' lands=' + landsOwned()); step(120); G.enemies = []; }
+  // map: zoom out, pick, fast travel, close
+  { calm(); drawUI(); const hb = HUDB(); ev('pointerup', 500, 300); tap({ x: hb.map.x, y: hb.map.y }); out.push('map open=' + !!G.map); G.map.k = 1; syncScene(0); renderer.render(scene, camera); drawUI(); const f = LANDS[0], q = toUI(f.x, 6, f.z); tap(q); out.push('sel=' + (G.map.sel && G.map.sel.id)); tap(MB().act); out.push('travelled=' + (dist(G.hero.x, G.hero.z, f.x, f.z) < 30) + ' map closed=' + !G.map); step(2); }
   // keep falls: back to checkpoint, buildings stay
-  G.checkpoint = 5; G.wave = 8; G.cleared = 7; const lv0 = G.padMap.t1.lvl; startWave(); G.padMap.keep.hp = 0; step(1); out.push('fell: state=' + G.state + ' overBank=' + Math.round(G.bank));
-  G.overT = 2; drawUI(); tap({ x: UW / 2, y: UH / 2 + 100 }); out.push('retry: state=' + G.state + ' wave=' + G.wave + ' t1same=' + (G.padMap.t1.lvl === lv0) + ' bank=' + Math.round(G.bank) + ' keep=' + G.padMap.keep.hp);
-  renderer.render(scene, camera); drawUI();
-  // v4: walking over a pad pays nothing, stopping pays
-  { const pd = G.padMap.boots, sp = padSpot(pd), hh = G.hero; G.enemies = []; G.queue = []; G.waveState = 'prep'; G.next = 999; G.coins = 500; pd.shown = true; pd.appear = 1; pd.paid = 0; hh.x = sp.x - 3; hh.z = sp.z; hh.padId = null; input.dx = 1; input.dz = 0; ev('pointerup', 0, 0); for (let i = 0; i < 24; i++) { input.dx = 1; update(1 / 30); } const walked = pd.paid; input.dx = 0; hh.x = sp.x; hh.z = sp.z; hh.vx = hh.vz = 0; const lv0b = pd.lvl; for (let i = 0; i < 45; i++) { input.dx = 0; update(1 / 30); } out.push('walk over pad paid=' + walked + ' | stopped paid=' + pd.paid + ' lvl ' + lv0b + '>' + pd.lvl); }
-  // invest grows on itself, bank stays small
-  { const mk = G.padMap.market; mk.lvl = 2; mk.shown = true; mk.appear = 1; rebuild(mk); G.coins = 1000; G.next = 999; const hh = G.hero; hh.x = INV_IN.x; hh.z = INV_IN.z; hh.vx = hh.vz = 0; input.dx = 0; step(40); const i0 = G.invest; out.push('invested=' + Math.round(i0) + ' coins=' + Math.round(G.coins)); hh.x = 24; hh.z = 30; G.wave = G.cleared = 20; G.bank = 100; waveClear(); out.push('after wave: invest ' + Math.round(i0) + '>' + Math.round(G.invest) + ' bank 100>' + Math.round(G.bank)); }
-  // gather, workers
-  { const hh = G.hero, w0 = G.wood; hh.x = NODES[0].x - 2; hh.z = NODES[0].z; hh.vx = hh.vz = 0; G.next = 999; step(45); out.push('gather wood ' + w0 + '>' + G.wood); const cp = G.padMap.camp; cp.lvl = 2; rebuild(cp); const ww = G.wood + G.stone; G.next = 999; hh.x = 24; hh.z = 30; for (let i = 0; i < 30 * 25; i++) { G.next = 999; update(1 / 30); } out.push('workers=' + G.workers.length + ' brought=' + (G.wood + G.stone - ww)); }
-  // town opens at a taken castle, more soldiers
-  { const tn = G.padMap.e_bk, n0 = G.soldiers.length; out.push('town shown=' + tn.shown); tn.lvl = 3; rebuild(tn); G.padMap.bk.lvl = 2; rebuild(G.padMap.bk); G.next = 999; update(1 / 30); out.push('soldiers ' + n0 + '>' + G.soldiers.length); }
-  // map: open, pick a land, attack, win
-  { G.enemies = []; G.queue = []; G.raid = null; G.waveState = 'prep'; G.next = 999; drawUI(); const hb = HUDB(); ev('pointerup', 0, 0); tap({ x: hb.map.x, y: hb.map.y }); out.push('map open=' + !!G.map); drawUI(); const land = WN.f3, q = mapXY(land); tap(q); out.push('sel=' + G.map.sel); G.wood = 40; G.stone = 20; const tb = G.troops; tap(MB().train); out.push('train ' + tb + '>' + G.troops); G.troops = 60; drawUI(); tap(MB().act); out.push('battle=' + !!G.map.battle); for (let i = 0; i < 400 && G.map.battle; i++) { mapTick(0.5); if (i === 2) drawUI(); } out.push('won=' + (G.world.f3 > 0) + ' troops=' + G.troops + ' lands=' + landsOwned()); G.wood = G.stone = 500; G.map.sel = 'f3'; tap(MB().act); out.push('built lv=' + G.world.f3); tap(MB().close); out.push('closed=' + !G.map); }
-  // all four castles: nothing resets
-  { G.cap = [true, true, true, false]; syncForts(); const R = FORTS[3]; G.raidAfter = 0; startRaid(R); G.raid.e.hp = 1; G.hero.x = R.x - 4.2; G.hero.z = R.z; step(40); out.push('all caps=' + G.cap.every(Boolean) + ' wave ok=' + (buildWave(50).paths.length > 0)); step(120); }
-  // old save loads with nothing lost
-  { const old = { cleared: 15, checkpoint: 15, coins: 403, bank: 2344, lv: { keep: 4, t1: 4, sword: 3, bank: 4, c1: 8, t7: 7 }, cap: [false, false, false, false], empire: 0, raidAfter: 0, kills: 1938 }; newGame(); applySave(old); out.push('old save: wave=' + G.wave + ' coins=' + G.coins + ' bank=' + G.bank + ' keep=' + G.lv('keep') + ' c1=' + G.lv('c1') + ' wood=' + G.wood + ' goal=' + G.goalI); }
+  G.checkpoint = 5; G.wave = 8; G.cleared = 7; const lv0 = G.padMap.t1.lvl; startWave(); G.padMap.keep.hp = 0; step(1); out.push('fell: state=' + G.state + ' bank=' + Math.round(G.bank));
+  G.overT = 2; drawUI(); tap({ x: UW / 2, y: UH / 2 + 100 }); out.push('retry: state=' + G.state + ' wave=' + G.wave + ' t1same=' + (G.padMap.t1.lvl === lv0) + ' keep=' + G.padMap.keep.hp);
+  syncScene(0); renderer.render(scene, camera); drawUI();
+  // older saves load with nothing lost
+  { const old = { cleared: 15, checkpoint: 15, coins: 403, bank: 2344, lv: { keep: 4, t1: 4, sword: 3, bank: 4, c1: 8, t7: 7 }, cap: [false, false, false, false], empire: 0, raidAfter: 0, kills: 1938 }; newGame(); applySave(old); out.push('v3 save: wave=' + G.wave + ' coins=' + G.coins + ' bank=' + G.bank + ' keep=' + G.lv('keep') + ' c1=' + G.lv('c1'));
+    const v4 = { ...old, invest: 500, wood: 40, stone: 30, troops: 22, world: { f3: 2, fc: 1 }, wdmg: { d1: 3 }, goalI: 14, seenMap: true, cap: [true, false, false, false], lv: { ...old.lv, e_bk: 2, market: 3 } }; newGame(); applySave(v4); out.push('v4 save: invest=' + G.invest + ' troops=' + G.troops + ' f3 ours=' + isOurs(LANDS[1]) + ' goal=' + G.goalI + ' town lv=' + G.lv('e_bk') + ' wild town open=' + G.padMap.l_f3_a.shown); }
   const pre = document.createElement('pre'); pre.id = 'test'; pre.textContent = out.join(' | '); document.body.appendChild(pre); document.title = 'TESTDONE';
 }
+if (Q.has('shot')) window.__r = renderer;
 newGame(); resize();
 if (!NOSAVE) await loadAll();
 if (Q.has('selftest')) setTimeout(selfTest, 300);
